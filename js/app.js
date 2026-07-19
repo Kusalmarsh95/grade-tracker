@@ -744,7 +744,7 @@
       const studentSelect = document.getElementById("rep-ind-student");
       if (studentSelect) studentSelect.addEventListener("change", (e) => { selInd.studentId = e.target.value; render(); });
       const dl = document.getElementById("rep-ind-download");
-      if (dl) dl.addEventListener("click", () => printReport(buildStudentReportHtml(selInd.studentId, true), "portrait"));
+      if (dl) dl.addEventListener("click", () => generateStudentReportPdf(selInd.studentId));
     } else {
       const selCls = state.selections.reportCls;
       document.getElementById("rep-cls-grade").addEventListener("change", (e) => {
@@ -753,7 +753,7 @@
       document.getElementById("rep-cls-class").addEventListener("change", (e) => { selCls.cls = e.target.value; render(); });
       document.getElementById("rep-cls-term").addEventListener("change", (e) => { selCls.term = e.target.value; render(); });
       const dl = document.getElementById("rep-cls-download");
-      if (dl) dl.addEventListener("click", () => printReport(buildClassReportHtml(selCls.grade, selCls.cls, selCls.term, true), "landscape"));
+      if (dl) dl.addEventListener("click", () => generateClassReportPdf(selCls.grade, selCls.cls, selCls.term));
     }
   }
 
@@ -904,17 +904,168 @@
       </div>`;
   }
 
-  function printReport(html, orientation) {
-    const printRoot = document.getElementById("print-root");
-    printRoot.innerHTML = `<style>@page{ size:A4 ${orientation}; margin:12mm; }</style>` + html;
-    document.title = SCHOOL_NAME + " — Report";
-    window.print();
+  const BRAND_TEAL = [21, 74, 70];
+  const BRAND_INK = [22, 48, 44];
+  const BRAND_MUTED = [108, 134, 129];
+  const BRAND_STRIPE = [240, 246, 244];
+
+  function getPdfLib() {
+    if (!window.jspdf || !window.jspdf.jsPDF) {
+      toast("PDF tools haven't finished loading yet — please check your connection and try again in a moment.", "error");
+      return null;
+    }
+    return window.jspdf.jsPDF;
   }
 
-  window.addEventListener("afterprint", () => {
-    document.getElementById("print-root").innerHTML = "";
-    document.title = "Grade Tracker — " + SCHOOL_NAME;
-  });
+  function safeFileToken(str) {
+    return String(str).trim().replace(/[^a-z0-9]+/gi, "_").replace(/^_+|_+$/g, "");
+  }
+
+  function pdfHeader(doc, subtitle) {
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(15);
+    doc.setTextColor(...BRAND_INK);
+    doc.text(SCHOOL_NAME, 14, 16);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9.5);
+    doc.setTextColor(...BRAND_MUTED);
+    doc.text(subtitle, 14, 22);
+    doc.setDrawColor(...BRAND_TEAL);
+    doc.setLineWidth(0.6);
+    const pageWidth = doc.internal.pageSize.getWidth();
+    doc.line(14, 26, pageWidth - 14, 26);
+  }
+
+  function generateStudentReportPdf(studentId) {
+    const jsPDFCtor = getPdfLib();
+    if (!jsPDFCtor) return;
+    const st = data.students.find((s) => s.id === studentId);
+    if (!st) return toast("Select a student first.", "error");
+
+    const subjects = data.grades[st.grade].subjects;
+    const ranking = classRankingOverall(st.grade, st.cls);
+    const overallRankRow = ranking.find((r) => r.id === studentId);
+    const overall = computeStudentOverallStats(studentId, st.grade);
+    const termStats = TERMS.map((t) => computeStudentTermStats(studentId, st.grade, t));
+    const termRankings = TERMS.map((t) => classRankingForTerm(st.grade, st.cls, t));
+
+    const body = subjects.map((subj) => {
+      const marksByTerm = TERMS.map((t) => studentMarks(studentId, t)[subj]);
+      const validMarks = marksByTerm.filter((v) => v !== undefined && v !== null && v !== "");
+      const subjAvg = validMarks.length ? validMarks.reduce((a, b) => a + Number(b), 0) / validMarks.length : null;
+      const g = gradeLetter(subjAvg);
+      return [
+        subj,
+        ...marksByTerm.map((v) => (v !== undefined && v !== null && v !== "" ? String(v) : "—")),
+        subjAvg !== null ? String(round1(subjAvg)) : "—",
+        g || "—"
+      ];
+    });
+
+    const doc = new jsPDFCtor({ orientation: "portrait", unit: "mm", format: "a4" });
+    pdfHeader(doc, `Student Progress Report · Generated ${todayStr()}`);
+
+    doc.setFontSize(10);
+    doc.setTextColor(...BRAND_INK);
+    doc.setFont("helvetica", "bold");
+    doc.text(st.name, 14, 34);
+    doc.setFont("helvetica", "normal");
+    doc.text(`Admission No.: ${st.admissionNo || "—"}`, 14, 40);
+    doc.text(`${st.grade}  ·  Class ${st.cls}`, 110, 40);
+
+    doc.autoTable({
+      startY: 46,
+      head: [["Subject", "Term 1", "Term 2", "Term 3", "Avg.", "Grade"]],
+      body,
+      theme: "grid",
+      styles: { fontSize: 9.5, cellPadding: 2.4, textColor: BRAND_INK },
+      headStyles: { fillColor: BRAND_TEAL, textColor: 255, fontSize: 9.5 },
+      alternateRowStyles: { fillColor: BRAND_STRIPE },
+      columnStyles: { 0: { halign: "left" }, 1: { halign: "center" }, 2: { halign: "center" }, 3: { halign: "center" }, 4: { halign: "center", fontStyle: "bold" }, 5: { halign: "center" } }
+    });
+
+    let y = doc.lastAutoTable.finalY + 9;
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.setTextColor(...BRAND_TEAL);
+    doc.text("Term summary", 14, y);
+    y += 6;
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(...BRAND_INK);
+    TERMS.forEach((t, i) => {
+      const rankRow = termRankings[i].find((r) => r.id === studentId);
+      doc.text(`${t}:  Total ${termStats[i].total}  ·  Rank ${rankRow ? rankRow.rank : "—"} / ${termRankings[i].length}`, 14, y);
+      y += 6;
+    });
+    doc.setFont("helvetica", "bold");
+    doc.text(`Overall average: ${round1(overall.average)}%  ·  Overall rank ${overallRankRow ? overallRankRow.rank : "—"} / ${ranking.length}`, 14, y + 2);
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    doc.setTextColor(...BRAND_MUTED);
+    doc.text("Unmarked subjects are counted as 0 towards totals. Grade bands: A \u226575, B \u226565, C \u226550, S \u226535, W <35.", 14, y + 10);
+
+    const filename = `${safeFileToken(st.name)}_${safeFileToken(st.grade)}_${safeFileToken(st.cls)}_Report.pdf`;
+    doc.save(filename);
+    toast("Report downloaded.");
+  }
+
+  function generateClassReportPdf(grade, cls, term) {
+    const jsPDFCtor = getPdfLib();
+    if (!jsPDFCtor) return;
+    const students = getStudentsFor(grade, cls);
+    if (!students.length) return toast("No students in this class yet.", "error");
+    const subjects = data.grades[grade].subjects;
+
+    const doc = new jsPDFCtor({ orientation: "landscape", unit: "mm", format: "a4" });
+    const isAll = term === "ALL";
+    pdfHeader(doc, `${isAll ? "Class Summary — All 3 Terms" : `Class Marksheet — ${term}`} · ${grade} / ${cls} · Generated ${todayStr()}`);
+
+    let head, body, columnStyles;
+    if (isAll) {
+      const ranking = classRankingOverall(grade, cls);
+      head = [["Student", "Admission No.", "Total (3 terms)", "Overall Avg.", "Grade", "Rank"]];
+      body = ranking.map((r) => [r.name, r.admissionNo || "—", String(r.total), round1(r.average) + "%", gradeLetter(r.average) || "—", String(r.rank)]);
+      columnStyles = { 0: { halign: "left" } };
+    } else {
+      const ranking = classRankingForTerm(grade, cls, term);
+      head = [["Student", ...subjects, "Total", "Average", "Rank"]];
+      body = ranking.map((r) => {
+        const marksObj = studentMarks(r.id, term);
+        const cells = subjects.map((subj) => {
+          const v = marksObj[subj];
+          return v !== undefined && v !== null && v !== "" ? String(v) : "—";
+        });
+        return [r.name, ...cells, String(r.total), round1(r.average) + "%", String(r.rank)];
+      });
+      columnStyles = { 0: { halign: "left" } };
+    }
+
+    const colCount = head[0].length;
+    const fontSize = colCount > 16 ? 6.5 : colCount > 13 ? 7.2 : colCount > 10 ? 8 : 9;
+
+    doc.autoTable({
+      startY: 32,
+      head, body, columnStyles,
+      theme: "grid",
+      styles: { fontSize, cellPadding: 1.8, textColor: BRAND_INK, halign: "center", overflow: "linebreak" },
+      headStyles: { fillColor: BRAND_TEAL, textColor: 255, fontSize: Math.min(fontSize + 0.4, 8) },
+      alternateRowStyles: { fillColor: BRAND_STRIPE },
+      margin: { left: 10, right: 10 }
+    });
+
+    const y = doc.lastAutoTable.finalY + 7;
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    doc.setTextColor(...BRAND_MUTED);
+    doc.text(isAll
+      ? `Total is the sum of term totals across ${subjects.length} subject(s) x 3 terms. Unmarked subjects count as 0.`
+      : "Blank cells mean no mark recorded (counted as 0 in the total).", 14, y);
+
+    const filename = `${safeFileToken(grade)}_${safeFileToken(cls)}_${isAll ? "AllTerms" : safeFileToken(term)}_ClassReport.pdf`;
+    doc.save(filename);
+    toast("Report downloaded.");
+  }
 
   /* ========================================================
      DATA / BACKUP

@@ -1,4 +1,4 @@
-const CACHE_NAME = "ubjmv-grade-tracker-v1";
+const CACHE_NAME = "ubjmv-grade-tracker-v2";
 const ASSETS = [
   "./",
   "./index.html",
@@ -6,12 +6,16 @@ const ASSETS = [
   "./js/app.js",
   "./manifest.json",
   "./icons/icon-192.png",
-  "./icons/icon-512.png"
+  "./icons/icon-512.png",
+  "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js",
+  "https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"
 ];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)).then(() => self.skipWaiting())
+    caches.open(CACHE_NAME).then((cache) =>
+      Promise.all(ASSETS.map((url) => cache.add(url).catch((err) => console.warn("Precache skipped:", url, err))))
+    ).then(() => self.skipWaiting())
   );
 });
 

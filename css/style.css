@@ -435,14 +435,3 @@ tbody tr:hover{ background:#FAFBF9; }
   .topbar{ padding:14px 16px; }
   .two-col{ gap:16px; }
 }
-
-/* =========================================================
-   Print styles
-   ========================================================= */
-#print-root{ display:none; }
-@media print{
-  body *{ visibility:hidden; }
-  #print-root, #print-root *{ visibility:visible; }
-  #print-root{ display:block; position:absolute; top:0; left:0; width:100%; margin:0; padding:0; }
-  @page{ size:A4; margin:14mm; }
-}
