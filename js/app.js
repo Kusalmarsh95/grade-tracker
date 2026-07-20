@@ -8,10 +8,11 @@
   /* ---------- Constants ---------- */
   const STORAGE_KEY = "ubjmv_gradetracker_data_v1";
   const SCHOOL_NAME = "U.B. Jayasooriya Maha Vidyalaya";
+  const SCHOOL_NAME_SI = "යූ.බී. ජයසූරිය මහා විද්‍යාලය";
   const GRADES = ["Grade 6", "Grade 7", "Grade 8", "Grade 9", "Grade 10", "Grade 11"];
   const TERMS = ["Term 1", "Term 2", "Term 3"];
-  const JUNIOR_SUBJECTS = ["Religion", "Sinhala Language", "English", "Mathematics", "Science", "History", "Geography", "Civics Education", "Second Language", "Health & Physical Education", "Aesthetic Subject", "Practical & Technical Skills"];
-  const SENIOR_SUBJECTS = ["Religion", "Sinhala Language", "English", "Mathematics", "Science", "History", "Basket Subject 1", "Basket Subject 2", "Basket Subject 3"];
+  const JUNIOR_SUBJECTS = ["බුද්ධ ධර්මය", "සිංහල", "ගණිතය", "විද්‍යාව", "ඉංග්‍රීසි", "ඉතිහාසය", "භූගෝලය", "පුරවැසි අධ්‍යනය", "සෞන්දර්ය", "සෞඛ්‍ය", "තො.ස.තා", "ප්‍රා.තා.කු"];
+  const SENIOR_SUBJECTS = ["බුද්ධ ධර්මය", "සිංහල", "ගණිතය", "විද්‍යාව", "ඉංග්‍රීසි", "ඉතිහාසය", "I කාණ්ඩ", "II කාණ්ඩය", "III කාණ්ඩය"];
 
   const state = {
     view: "dashboard",
@@ -65,6 +66,172 @@
 
   function uid(prefix) {
     return (prefix || "id") + "_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  }
+
+  /* ========================================================
+     CLOUD SYNC (optional — Firebase Firestore)
+     Lets several teachers, each on their own phone, share one
+     live class roster + mark sheet. Fully inert until a real
+     FIREBASE_CONFIG is provided in js/firebase-config.js.
+     ======================================================== */
+  const SYNC_CODE_KEY = "ubjmv_sync_code";
+  const SYNC_SKIPPED_KEY = "ubjmv_sync_skipped";
+
+  let db = null;
+  let syncCode = localStorage.getItem(SYNC_CODE_KEY) || "";
+  let syncStatus = "off"; // off | connecting | connected | error
+  let syncUnsubscribers = [];
+
+  function isFirebaseConfigured() {
+    return typeof FIREBASE_CONFIG !== "undefined" && FIREBASE_CONFIG.apiKey && !FIREBASE_CONFIG.apiKey.startsWith("PASTE_");
+  }
+
+  function isSyncActive() {
+    return isFirebaseConfigured() && !!syncCode && !!db;
+  }
+
+  function ensureFirebaseApp() {
+    if (db) return;
+    if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+    db = firebase.firestore();
+    db.enablePersistence({ synchronizeTabs: true }).catch((err) => console.warn("Offline persistence not enabled:", err.code));
+  }
+
+  function roomRef() { return db.collection("syncRooms").doc(syncCode); }
+  function studentsCol() { return roomRef().collection("students"); }
+  function marksCol() { return roomRef().collection("marks"); }
+  function configDocRef() { return roomRef().collection("meta").doc("config"); }
+
+  function stopSyncListeners() {
+    syncUnsubscribers.forEach((u) => u());
+    syncUnsubscribers = [];
+  }
+
+  function attachSyncListeners() {
+    const unsubConfig = configDocRef().onSnapshot((doc) => {
+      syncStatus = "connected";
+      if (doc.exists && doc.data().grades) data.grades = doc.data().grades;
+      saveData(); updateSyncUI(); render();
+    }, (err) => { syncStatus = "error"; updateSyncUI(); console.error(err); });
+
+    const unsubStudents = studentsCol().onSnapshot((snap) => {
+      data.students = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      saveData(); render();
+    }, (err) => console.error(err));
+
+    const unsubMarks = marksCol().onSnapshot((snap) => {
+      const marks = {};
+      snap.docs.forEach((d) => { marks[d.id] = d.data(); });
+      data.marks = marks;
+      saveData(); render();
+    }, (err) => console.error(err));
+
+    syncUnsubscribers = [unsubConfig, unsubStudents, unsubMarks];
+  }
+
+  async function syncFullReplace() {
+    if (!isSyncActive()) return;
+    const batch = db.batch();
+    batch.set(configDocRef(), { grades: data.grades });
+    const [existingStudents, existingMarks] = await Promise.all([studentsCol().get(), marksCol().get()]);
+    const keepIds = new Set(data.students.map((s) => s.id));
+    existingStudents.docs.forEach((d) => { if (!keepIds.has(d.id)) batch.delete(d.ref); });
+    existingMarks.docs.forEach((d) => { if (!keepIds.has(d.id)) batch.delete(d.ref); });
+    data.students.forEach((s) => batch.set(studentsCol().doc(s.id), s));
+    Object.keys(data.marks).forEach((sid) => batch.set(marksCol().doc(sid), data.marks[sid] || {}));
+    await batch.commit();
+  }
+
+  async function startSync(code) {
+    if (!isFirebaseConfigured()) {
+      toast("Cloud sync isn't set up yet for this school — see the Sync tab for setup steps.", "error");
+      return;
+    }
+    const trimmed = code.trim();
+    if (!trimmed) return toast("Enter a sync code first.", "error");
+
+    stopSyncListeners();
+    syncCode = trimmed;
+    localStorage.setItem(SYNC_CODE_KEY, syncCode);
+    localStorage.removeItem(SYNC_SKIPPED_KEY);
+    syncStatus = "connecting";
+    updateSyncUI();
+
+    try {
+      ensureFirebaseApp();
+      const [configSnap, studentsSnap] = await Promise.all([configDocRef().get(), studentsCol().limit(1).get()]);
+      const roomIsEmpty = !configSnap.exists && studentsSnap.empty;
+      if (roomIsEmpty && (data.students.length || Object.keys(data.marks).length)) {
+        await syncFullReplace();
+        toast("Connected — your existing data is now shared with this code.");
+      } else if (!roomIsEmpty) {
+        toast("Connected — synced with the existing shared data.");
+      } else {
+        toast("Connected. Waiting for data from other devices...");
+      }
+      attachSyncListeners();
+    } catch (e) {
+      console.error(e);
+      syncStatus = "error";
+      updateSyncUI();
+      toast("Could not reach the cloud. Check your internet connection and try again.", "error");
+    }
+  }
+
+  function stopSync() {
+    stopSyncListeners();
+    syncCode = "";
+    localStorage.removeItem(SYNC_CODE_KEY);
+    syncStatus = "off";
+    updateSyncUI();
+    toast("Disconnected — this device now works offline-only again.");
+  }
+
+  function updateSyncUI() {
+    const labels = { off: "Offline only", connecting: "Connecting…", connected: "Live sync on", error: "Sync error" };
+    document.querySelectorAll("[data-sync-indicator]").forEach((badge) => {
+      badge.className = "sync-badge sync-" + syncStatus;
+      badge.setAttribute("data-sync-indicator", "");
+      badge.innerHTML = `<span class="dot"></span> ${labels[syncStatus]}`;
+    });
+    if (state.view === "data") render();
+  }
+
+  function syncPushConfig(grade) {
+    if (!isSyncActive()) return;
+    const ref = configDocRef();
+    if (!grade) {
+      // Full replace — only used for initial connect / import / reset.
+      ref.set({ grades: data.grades }).catch((e) => console.error(e));
+      return;
+    }
+    // Scoped to just the one grade that changed, so a teacher editing Grade 6's
+    // subjects can't overwrite another teacher's concurrent edit to Grade 9.
+    ref.set({}, { merge: true })
+      .then(() => ref.update({ [`grades.${grade}`]: data.grades[grade] }))
+      .catch((e) => console.error(e));
+  }
+  function syncPushStudent(student) {
+    if (isSyncActive()) studentsCol().doc(student.id).set(student).catch((e) => console.error(e));
+  }
+  function syncDeleteStudent(id) {
+    if (isSyncActive()) {
+      studentsCol().doc(id).delete().catch((e) => console.error(e));
+      marksCol().doc(id).delete().catch((e) => console.error(e));
+    }
+  }
+  function syncPushMark(studentId, term, subject, value) {
+    if (!isSyncActive()) return;
+    const ref = marksCol().doc(studentId);
+    const fieldPath = `${term}.${subject}`;
+    const fieldValue = (value === null || value === undefined) ? firebase.firestore.FieldValue.delete() : value;
+    // set({}, {merge:true}) first guarantees the document exists (a no-op if it
+    // already does), so the follow-up update() — which is what actually makes
+    // Firestore treat the dotted key as a nested path instead of a literal
+    // field name — never fails with "document not found" for a brand-new student.
+    ref.set({}, { merge: true })
+      .then(() => ref.update({ [fieldPath]: fieldValue }))
+      .catch((e) => console.error(e));
   }
 
   /* ---------- Calculation helpers ---------- */
@@ -225,7 +392,7 @@
     students: ["Roster", "Students"],
     marks: ["Recording", "Marks Entry"],
     reports: ["Downloads", "Reports"],
-    data: ["Safety", "Backup & Restore"]
+    data: ["Safety", "Data & Sync"]
   };
 
   function setView(view) {
@@ -241,6 +408,17 @@
     const root = document.getElementById("view-root");
     const actions = document.getElementById("topbar-actions");
     actions.innerHTML = "";
+    if (isFirebaseConfigured()) {
+      const labels = { off: "Offline only", connecting: "Connecting…", connected: "Live sync on", error: "Sync error" };
+      const badge = document.createElement("div");
+      badge.className = "sync-badge sync-" + syncStatus;
+      badge.setAttribute("data-sync-indicator", "");
+      badge.innerHTML = `<span class="dot"></span> ${labels[syncStatus]}`;
+      badge.title = isSyncActive() ? "Go to Data & Sync to manage" : "Go to Data & Sync to connect";
+      badge.style.cursor = "pointer";
+      badge.addEventListener("click", () => setView("data"));
+      actions.appendChild(badge);
+    }
     switch (state.view) {
       case "dashboard": root.innerHTML = renderDashboard(); break;
       case "setup": root.innerHTML = renderSetup(); attachSetupEvents(); break;
@@ -365,7 +543,7 @@
         if (!val) return toast("Enter a class name first.", "error");
         if (data.grades[g].classes.includes(val)) return toast("That class already exists.", "error");
         data.grades[g].classes.push(val);
-        saveData(); render(); toast(`Added class ${val} to ${g}.`);
+        saveData(); syncPushConfig(g); render(); toast(`Added class ${val} to ${g}.`);
       });
     });
     document.querySelectorAll("[data-remove-class]").forEach((btn) => {
@@ -378,7 +556,7 @@
             : `Remove class "${c}" from ${g}?`,
           () => {
             data.grades[g].classes = data.grades[g].classes.filter((x) => x !== c);
-            saveData(); render(); toast("Class removed.");
+            saveData(); syncPushConfig(g); render(); toast("Class removed.");
           },
           "Remove class"
         );
@@ -392,7 +570,7 @@
         if (!val) return toast("Enter a subject name first.", "error");
         if (data.grades[g].subjects.includes(val)) return toast("That subject already exists.", "error");
         data.grades[g].subjects.push(val);
-        saveData(); render(); toast(`Added ${val} to ${g}.`);
+        saveData(); syncPushConfig(g); render(); toast(`Added ${val} to ${g}.`);
       });
     });
     document.querySelectorAll("[data-remove-subject]").forEach((btn) => {
@@ -400,7 +578,7 @@
         const [g, s] = btn.dataset.removeSubject.split("||");
         confirmModal(`Remove "${s}" from ${g}? Any marks already entered for this subject will no longer be shown.`, () => {
           data.grades[g].subjects = data.grades[g].subjects.filter((x) => x !== s);
-          saveData(); render(); toast("Subject removed.");
+          saveData(); syncPushConfig(g); render(); toast("Subject removed.");
         }, "Remove subject");
       });
     });
@@ -410,7 +588,7 @@
         const isSenior = g === "Grade 10" || g === "Grade 11";
         confirmModal(`Reset ${g} subjects to the default list? Custom subjects you added will be removed.`, () => {
           data.grades[g].subjects = isSenior ? [...SENIOR_SUBJECTS] : [...JUNIOR_SUBJECTS];
-          saveData(); render(); toast("Subjects reset to default.");
+          saveData(); syncPushConfig(g); render(); toast("Subjects reset to default.");
         }, "Reset");
       });
     });
@@ -510,6 +688,7 @@
       if (!cls) return toast("Add a class to this grade first (see Setup).", "error");
       data.students.push({ id: uid("st"), name, admissionNo, grade, cls });
       saveData();
+      syncPushStudent(data.students[data.students.length - 1]);
       sel.grade = grade; sel.cls = cls;
       render();
       toast(`Added ${name}.`);
@@ -530,6 +709,7 @@
               if (!names.length) return;
               names.forEach((name) => data.students.push({ id: uid("st"), name, admissionNo: "", grade, cls }));
               saveData();
+              names.forEach((name, i) => syncPushStudent(data.students[data.students.length - names.length + i]));
               sel.grade = grade; sel.cls = cls;
               render();
               toast(`Added ${names.length} student(s).`);
@@ -558,7 +738,7 @@
                 st.admissionNo = document.getElementById("edit-admission").value.trim();
                 st.grade = document.getElementById("edit-grade").value;
                 st.cls = document.getElementById("edit-class").value;
-                saveData(); render(); toast("Student updated.");
+                saveData(); syncPushStudent(st); render(); toast("Student updated.");
               }
             }
           ]
@@ -577,7 +757,7 @@
         confirmModal(`Delete ${st.name} and all of their recorded marks? This cannot be undone.`, () => {
           data.students = data.students.filter((s) => s.id !== st.id);
           delete data.marks[st.id];
-          saveData(); render(); toast("Student deleted.");
+          saveData(); syncDeleteStudent(st.id); render(); toast("Student deleted.");
         }, "Delete student");
       });
     });
@@ -587,10 +767,11 @@
      MARKS ENTRY
      ======================================================== */
   function renderMarks() {
-    const sel = state.selections.marks || (state.selections.marks = { grade: GRADES[0], cls: data.grades[GRADES[0]].classes[0] || "", term: TERMS[0] });
+    const sel = state.selections.marks || (state.selections.marks = { grade: GRADES[0], cls: data.grades[GRADES[0]].classes[0] || "", term: TERMS[0], subject: "" });
     if (!data.grades[sel.grade].classes.includes(sel.cls)) sel.cls = data.grades[sel.grade].classes[0] || "";
 
     const subjects = data.grades[sel.grade].subjects;
+    if (!sel.subject || (sel.subject !== "ALL" && !subjects.includes(sel.subject))) sel.subject = subjects[0] || "ALL";
     const students = [...getStudentsFor(sel.grade, sel.cls)].sort((a, b) => a.name.localeCompare(b.name));
 
     const classOptions = data.grades[sel.grade].classes.map((c) => `<option ${c === sel.cls ? "selected" : ""}>${escapeHtml(c)}</option>`).join("");
@@ -607,14 +788,25 @@
       return `<div class="empty-state"><p>No subjects configured for ${sel.grade}. Add subjects under Setup first.</p></div>`;
     }
 
-    const headerCells = subjects.map((s) => `<th style="min-width:88px;">${escapeHtml(s)}</th>`).join("");
+    const isWide = sel.subject === "ALL";
+    const subjectOptions = subjects.map((s) => `<option value="${escapeHtml(s)}" ${s === sel.subject ? "selected" : ""}>${escapeHtml(s)}</option>`).join("")
+      + `<option value="ALL" ${isWide ? "selected" : ""}>All subjects (wide view)</option>`;
+
+    const headerCells = isWide
+      ? subjects.map((s) => `<th style="min-width:88px;">${escapeHtml(s)}</th>`).join("")
+      : `<th style="min-width:120px;">${escapeHtml(sel.subject)}</th>`;
 
     const rows = students.map((st) => {
       const marksObj = studentMarks(st.id, sel.term);
-      const cells = subjects.map((subj) => {
-        const v = marksObj[subj];
-        return `<td><input type="number" min="0" max="100" class="mark-input" data-student="${st.id}" data-subject="${escapeHtml(subj)}" value="${v !== undefined && v !== null ? v : ""}"></td>`;
-      }).join("");
+      const cells = isWide
+        ? subjects.map((subj) => {
+            const v = marksObj[subj];
+            return `<td><input type="number" min="0" max="100" class="mark-input" data-student="${st.id}" data-subject="${escapeHtml(subj)}" value="${v !== undefined && v !== null ? v : ""}"></td>`;
+          }).join("")
+        : (() => {
+            const v = marksObj[sel.subject];
+            return `<td><input type="number" min="0" max="100" class="mark-input" data-student="${st.id}" data-subject="${escapeHtml(sel.subject)}" value="${v !== undefined && v !== null ? v : ""}"></td>`;
+          })();
       const stats = computeStudentTermStats(st.id, sel.grade, sel.term);
       const g = stats.entered > 0 ? gradeLetter(stats.average) : null;
       return `<tr data-row-student="${st.id}">
@@ -631,8 +823,11 @@
         <div class="field"><label>Grade</label><select id="marks-grade">${GRADES.map((g) => `<option ${g === sel.grade ? "selected" : ""}>${g}</option>`).join("")}</select></div>
         <div class="field"><label>Class</label><select id="marks-class">${classOptions}</select></div>
         <div class="field"><label>Term</label><select id="marks-term">${TERMS.map((t) => `<option ${t === sel.term ? "selected" : ""}>${t}</option>`).join("")}</select></div>
+        <div class="field"><label>Subject</label><select id="marks-subject">${subjectOptions}</select></div>
       </div>
-      <p class="hint">Marks are out of 100 and save automatically as you type. Blank cells count as 0 in the total.</p>
+      <p class="hint">${isWide
+        ? "Showing all subjects. Marks are out of 100 and save automatically. Blank cells count as 0 in the total."
+        : `Entering marks for <b>${escapeHtml(sel.subject)}</b> only. Total/Average reflect every subject entered by all teachers for this class.`}</p>
       ${students.length ? `<div class="table-wrap"><table>
         <thead><tr><th style="min-width:140px;">Student</th>${headerCells}<th>Total</th><th>Average</th><th>Grade</th></tr></thead>
         <tbody>${rows}</tbody>
@@ -645,12 +840,15 @@
     document.getElementById("marks-grade").addEventListener("change", (e) => {
       sel.grade = e.target.value;
       sel.cls = data.grades[sel.grade].classes[0] || "";
+      sel.subject = "";
       render();
     });
     const classSelect = document.getElementById("marks-class");
     if (classSelect) classSelect.addEventListener("change", (e) => { sel.cls = e.target.value; render(); });
     const termSelect = document.getElementById("marks-term");
     if (termSelect) termSelect.addEventListener("change", (e) => { sel.term = e.target.value; render(); });
+    const subjectSelect = document.getElementById("marks-subject");
+    if (subjectSelect) subjectSelect.addEventListener("change", (e) => { sel.subject = e.target.value; render(); });
 
     document.querySelectorAll(".mark-input").forEach((input) => {
       input.addEventListener("change", () => {
@@ -663,6 +861,7 @@
         if (val === null) delete data.marks[studentId][sel.term][subject];
         else data.marks[studentId][sel.term][subject] = val;
         saveData();
+        syncPushMark(studentId, sel.term, subject, val);
         updateRowStats(studentId);
       });
     });
@@ -744,7 +943,11 @@
       const studentSelect = document.getElementById("rep-ind-student");
       if (studentSelect) studentSelect.addEventListener("change", (e) => { selInd.studentId = e.target.value; render(); });
       const dl = document.getElementById("rep-ind-download");
-      if (dl) dl.addEventListener("click", () => generateStudentReportPdf(selInd.studentId));
+      if (dl) dl.addEventListener("click", async () => {
+        dl.disabled = true;
+        toast("Preparing report…");
+        try { await generateStudentReportPdf(selInd.studentId); } finally { dl.disabled = false; }
+      });
     } else {
       const selCls = state.selections.reportCls;
       document.getElementById("rep-cls-grade").addEventListener("change", (e) => {
@@ -753,7 +956,11 @@
       document.getElementById("rep-cls-class").addEventListener("change", (e) => { selCls.cls = e.target.value; render(); });
       document.getElementById("rep-cls-term").addEventListener("change", (e) => { selCls.term = e.target.value; render(); });
       const dl = document.getElementById("rep-cls-download");
-      if (dl) dl.addEventListener("click", () => generateClassReportPdf(selCls.grade, selCls.cls, selCls.term));
+      if (dl) dl.addEventListener("click", async () => {
+        dl.disabled = true;
+        toast("Preparing report…");
+        try { await generateClassReportPdf(selCls.grade, selCls.cls, selCls.term); } finally { dl.disabled = false; }
+      });
     }
   }
 
@@ -909,6 +1116,32 @@
   const BRAND_MUTED = [108, 134, 129];
   const BRAND_STRIPE = [240, 246, 244];
 
+  const SI = {
+    studentProgressReport: "ශිෂ්‍ය ප්‍රගති වාර්තාව",
+    student: "ශිෂ්‍යයා",
+    subject: "විෂය",
+    grade: "පංතිය",
+    admissionNo: "ලියාපදිංචි අංකය",
+    classLabel: "අංශය",
+    total: "එකතුව",
+    totalThreeTerms: "එකතුව (වාර 3)",
+    average: "සාමාන්‍ය",
+    overallAverage: "සමස්ත සාමාන්‍යය",
+    rank: "ස්ථානය",
+    overallRank: "සමස්ත ස්ථානය",
+    termSummary: "වාර සාරාංශය",
+    classMarksheet: "පන්ති ලකුණු ලේඛනය",
+    classSummaryAllTerms: "පන්ති සාරාංශය — වාර 3ම",
+    generated: "සකස් කළ දිනය",
+    footnoteMarks: "ලකුණු ඇතුළත් නොකළ විෂයයන් 0ක් ලෙස ගණන් කෙරේ.",
+    footnoteGradeBands: "ශ්‍රේණි සීමා: A \u226575, B \u226565, C \u226550, S \u226535, W <35"
+  };
+
+  function termLabelSi(term) {
+    const n = String(term).replace(/\D/g, "");
+    return `${n} වන වාරය`;
+  }
+
   function getPdfLib() {
     if (!window.jspdf || !window.jspdf.jsPDF) {
       toast("PDF tools haven't finished loading yet — please check your connection and try again in a moment.", "error");
@@ -918,29 +1151,168 @@
   }
 
   function safeFileToken(str) {
-    return String(str).trim().replace(/[^a-z0-9]+/gi, "_").replace(/^_+|_+$/g, "");
+    // Keep Unicode letters (Sinhala names, etc.) intact — only strip characters
+    // that are genuinely unsafe in filenames, plus collapse whitespace.
+    return String(str).trim()
+      .replace(/[\/\\:*?"<>|]+/g, "_")
+      .replace(/\s+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "");
+  }
+
+  function gradeClassToken(grade, cls) {
+    // "Grade 6", "A" -> "Grade6-A"
+    return String(grade).replace(/\s+/g, "") + "-" + safeFileToken(cls);
+  }
+
+  // ---- Sinhala-aware text rendering ------------------------------------
+  // jsPDF's built-in fonts only support Latin (WinAnsi) glyphs, and jsPDF has
+  // no complex-script shaping engine, so Sinhala (which reorders certain
+  // vowel signs before their consonant) cannot be drawn correctly with plain
+  // doc.text(). Instead, any non-ASCII string is rendered to a small PNG
+  // using the browser's own text engine (which shapes Sinhala correctly)
+  // and that image is placed into the PDF. Plain ASCII/numeric text still
+  // uses native vector text, which stays crisp and small.
+  function needsImageRender(text) {
+    return /[^\x00-\x7F]/.test(String(text));
+  }
+
+  let sinhalaFontReadyPromise = null;
+  function ensureSinhalaFontLoaded() {
+    if (!sinhalaFontReadyPromise) {
+      sinhalaFontReadyPromise = (async () => {
+        try {
+          if (document.fonts && document.fonts.load) {
+            await Promise.all([
+              document.fonts.load('400 32px "Noto Sans Sinhala"'),
+              document.fonts.load('700 32px "Noto Sans Sinhala"')
+            ]);
+          }
+          if (document.fonts && document.fonts.ready) await document.fonts.ready;
+        } catch (e) { console.warn("Sinhala font preload check failed", e); }
+      })();
+    }
+    return sinhalaFontReadyPromise;
+  }
+
+  const _textImageCache = new Map();
+  function renderTextToImage(text, ptSize, opts) {
+    opts = opts || {};
+    const weight = opts.weight || "400";
+    const colorHex = opts.colorHex || "#16302C";
+    const raw = text === "" || text === null || text === undefined ? " " : String(text);
+    const key = raw + "|" + ptSize + "|" + weight + "|" + colorHex;
+    if (_textImageCache.has(key)) return _textImageCache.get(key);
+
+    const SCALE = 3; // supersample so the embedded image stays crisp when printed
+    const fontPx = ptSize * (96 / 72) * SCALE;
+    const family = '"Noto Sans Sinhala", "Iskoola Pota", "Nirmala UI", "Noto Sans", sans-serif';
+
+    const mctx = document.createElement("canvas").getContext("2d");
+    mctx.font = `${weight} ${fontPx}px ${family}`;
+    const metrics = mctx.measureText(raw);
+    const ascent = metrics.actualBoundingBoxAscent || fontPx * 0.85;
+    const descent = metrics.actualBoundingBoxDescent || fontPx * 0.28;
+    const textWidth = Math.max(1, metrics.width);
+    const padX = fontPx * 0.08;
+    const padY = fontPx * 0.14;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.ceil(textWidth + padX * 2);
+    canvas.height = Math.ceil(ascent + descent + padY * 2);
+    const ctx = canvas.getContext("2d");
+    ctx.font = `${weight} ${fontPx}px ${family}`;
+    ctx.fillStyle = colorHex;
+    ctx.textBaseline = "alphabetic";
+    const baselineY = padY + ascent;
+    ctx.fillText(raw, padX, baselineY);
+
+    const mmPerPx = 0.264583 / SCALE;
+    const result = {
+      dataUrl: canvas.toDataURL("image/png"),
+      widthMM: canvas.width * mmPerPx,
+      heightMM: canvas.height * mmPerPx,
+      baselineMM: baselineY * mmPerPx
+    };
+    _textImageCache.set(key, result);
+    return result;
+  }
+
+  function rgbToHex(rgb) {
+    return "#" + rgb.map((c) => c.toString(16).padStart(2, "0")).join("");
+  }
+
+  // Draws one line of text at (x, y) — y is the baseline, matching doc.text().
+  function drawText(doc, text, x, y, opts) {
+    opts = opts || {};
+    const align = opts.align || "left";
+    const str = text === null || text === undefined ? "" : String(text);
+    if (!needsImageRender(str)) {
+      doc.setFont("helvetica", opts.weight === "700" ? "bold" : "normal");
+      doc.setFontSize(opts.ptSize || 10);
+      doc.setTextColor(...(opts.color || BRAND_INK));
+      doc.text(str, x, y, { align });
+      return;
+    }
+    const img = renderTextToImage(str, opts.ptSize || 10, { weight: opts.weight || "400", colorHex: opts.colorHex || rgbToHex(opts.color || BRAND_INK) });
+    let imgX = x;
+    if (align === "center") imgX = x - img.widthMM / 2;
+    else if (align === "right") imgX = x - img.widthMM;
+    doc.addImage(img.dataUrl, "PNG", imgX, y - img.baselineMM, img.widthMM, img.heightMM);
+  }
+
+  // autoTable hooks: any cell whose raw value contains non-ASCII text is
+  // blanked out by the library's own renderer and redrawn as a fitted image;
+  // plain ASCII/number cells (marks, ranks, totals) render natively as usual.
+  function sinhalaCellHooks(doc, baseFontSize) {
+    return {
+      didParseCell: (d) => {
+        const raw = d.cell.raw;
+        if (raw !== undefined && raw !== null && needsImageRender(String(raw))) d.cell.text = [];
+      },
+      didDrawCell: (d) => {
+        const raw = d.cell.raw;
+        if (raw === undefined || raw === null) return;
+        const str = String(raw);
+        if (!needsImageRender(str)) return;
+        const isHead = d.section === "head";
+        const weight = isHead || (d.cell.styles && d.cell.styles.fontStyle === "bold") ? "700" : "400";
+        const colorHex = isHead ? "#FFFFFF" : "#16302C";
+        const ptSize = (d.cell.styles && d.cell.styles.fontSize) || baseFontSize;
+        const img = renderTextToImage(str, ptSize, { weight, colorHex });
+        const padL = d.cell.padding("left");
+        const padR = d.cell.padding("right");
+        const padT = d.cell.padding("top");
+        const padB = d.cell.padding("bottom");
+        const maxW = d.cell.width - padL - padR;
+        const maxH = d.cell.height - padT - padB;
+        const scale = Math.min(1, maxW / img.widthMM, maxH / img.heightMM);
+        const w = img.widthMM * scale, h = img.heightMM * scale;
+        const halign = (d.cell.styles && d.cell.styles.halign) || "left";
+        let x = d.cell.x + padL;
+        if (halign === "center") x = d.cell.x + (d.cell.width - w) / 2;
+        else if (halign === "right") x = d.cell.x + d.cell.width - padR - w;
+        const y = d.cell.y + (d.cell.height - h) / 2;
+        doc.addImage(img.dataUrl, "PNG", x, y, w, h);
+      }
+    };
   }
 
   function pdfHeader(doc, subtitle) {
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(15);
-    doc.setTextColor(...BRAND_INK);
-    doc.text(SCHOOL_NAME, 14, 16);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(9.5);
-    doc.setTextColor(...BRAND_MUTED);
-    doc.text(subtitle, 14, 22);
+    drawText(doc, SCHOOL_NAME_SI, 14, 16, { ptSize: 15, weight: "700", color: BRAND_INK });
+    drawText(doc, subtitle, 14, 22, { ptSize: 9.5, weight: "400", color: BRAND_MUTED });
     doc.setDrawColor(...BRAND_TEAL);
     doc.setLineWidth(0.6);
     const pageWidth = doc.internal.pageSize.getWidth();
     doc.line(14, 26, pageWidth - 14, 26);
   }
 
-  function generateStudentReportPdf(studentId) {
+  async function generateStudentReportPdf(studentId) {
     const jsPDFCtor = getPdfLib();
     if (!jsPDFCtor) return;
     const st = data.students.find((s) => s.id === studentId);
     if (!st) return toast("Select a student first.", "error");
+    await ensureSinhalaFontLoaded();
 
     const subjects = data.grades[st.grade].subjects;
     const ranking = classRankingOverall(st.grade, st.cls);
@@ -963,73 +1335,63 @@
     });
 
     const doc = new jsPDFCtor({ orientation: "portrait", unit: "mm", format: "a4" });
-    pdfHeader(doc, `Student Progress Report · Generated ${todayStr()}`);
+    pdfHeader(doc, `${SI.studentProgressReport} \u00b7 ${SI.generated} ${todayStr()}`);
 
-    doc.setFontSize(10);
-    doc.setTextColor(...BRAND_INK);
-    doc.setFont("helvetica", "bold");
-    doc.text(st.name, 14, 34);
-    doc.setFont("helvetica", "normal");
-    doc.text(`Admission No.: ${st.admissionNo || "—"}`, 14, 40);
-    doc.text(`${st.grade}  ·  Class ${st.cls}`, 110, 40);
+    drawText(doc, st.name, 14, 34, { ptSize: 11, weight: "700", color: BRAND_INK });
+    drawText(doc, `${SI.admissionNo}: ${st.admissionNo || "—"}`, 14, 40, { ptSize: 9.5, weight: "400", color: BRAND_INK });
+    drawText(doc, `${SI.grade} ${st.grade.replace(/\D/g, "")}  \u00b7  ${SI.classLabel} ${st.cls}`, 110, 40, { ptSize: 9.5, weight: "400", color: BRAND_INK });
 
     doc.autoTable({
       startY: 46,
-      head: [["Subject", "Term 1", "Term 2", "Term 3", "Avg.", "Grade"]],
+      head: [[SI.subject, ...TERMS.map(termLabelSi), SI.average, "Grade"]],
       body,
       theme: "grid",
-      styles: { fontSize: 9.5, cellPadding: 2.4, textColor: BRAND_INK },
+      styles: { fontSize: 9.5, cellPadding: 2.6, textColor: BRAND_INK },
       headStyles: { fillColor: BRAND_TEAL, textColor: 255, fontSize: 9.5 },
       alternateRowStyles: { fillColor: BRAND_STRIPE },
-      columnStyles: { 0: { halign: "left" }, 1: { halign: "center" }, 2: { halign: "center" }, 3: { halign: "center" }, 4: { halign: "center", fontStyle: "bold" }, 5: { halign: "center" } }
+      columnStyles: { 0: { halign: "left" }, 1: { halign: "center" }, 2: { halign: "center" }, 3: { halign: "center" }, 4: { halign: "center", fontStyle: "bold" }, 5: { halign: "center" } },
+      ...sinhalaCellHooks(doc, 9.5)
     });
 
     let y = doc.lastAutoTable.finalY + 9;
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(10);
-    doc.setTextColor(...BRAND_TEAL);
-    doc.text("Term summary", 14, y);
+    drawText(doc, SI.termSummary, 14, y, { ptSize: 10, weight: "700", color: BRAND_TEAL });
     y += 6;
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(...BRAND_INK);
     TERMS.forEach((t, i) => {
       const rankRow = termRankings[i].find((r) => r.id === studentId);
-      doc.text(`${t}:  Total ${termStats[i].total}  ·  Rank ${rankRow ? rankRow.rank : "—"} / ${termRankings[i].length}`, 14, y);
+      drawText(doc, `${termLabelSi(t)}:  ${SI.total} ${termStats[i].total}  \u00b7  ${SI.rank} ${rankRow ? rankRow.rank : "—"} / ${termRankings[i].length}`, 14, y, { ptSize: 10, weight: "400", color: BRAND_INK });
       y += 6;
     });
-    doc.setFont("helvetica", "bold");
-    doc.text(`Overall average: ${round1(overall.average)}%  ·  Overall rank ${overallRankRow ? overallRankRow.rank : "—"} / ${ranking.length}`, 14, y + 2);
+    drawText(doc, `${SI.overallAverage}: ${round1(overall.average)}%  \u00b7  ${SI.overallRank} ${overallRankRow ? overallRankRow.rank : "—"} / ${ranking.length}`, 14, y + 2, { ptSize: 10, weight: "700", color: BRAND_INK });
 
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(7.5);
-    doc.setTextColor(...BRAND_MUTED);
-    doc.text("Unmarked subjects are counted as 0 towards totals. Grade bands: A \u226575, B \u226565, C \u226550, S \u226535, W <35.", 14, y + 10);
+    drawText(doc, SI.footnoteMarks + "  " + SI.footnoteGradeBands, 14, y + 10, { ptSize: 7.5, weight: "400", color: BRAND_MUTED });
 
-    const filename = `${safeFileToken(st.name)}_${safeFileToken(st.grade)}_${safeFileToken(st.cls)}_Report.pdf`;
+    const filename = `${safeFileToken(st.name)}_${gradeClassToken(st.grade, st.cls)}_Report.pdf`;
     doc.save(filename);
     toast("Report downloaded.");
   }
 
-  function generateClassReportPdf(grade, cls, term) {
+  async function generateClassReportPdf(grade, cls, term) {
     const jsPDFCtor = getPdfLib();
     if (!jsPDFCtor) return;
     const students = getStudentsFor(grade, cls);
     if (!students.length) return toast("No students in this class yet.", "error");
+    await ensureSinhalaFontLoaded();
     const subjects = data.grades[grade].subjects;
 
     const doc = new jsPDFCtor({ orientation: "landscape", unit: "mm", format: "a4" });
     const isAll = term === "ALL";
-    pdfHeader(doc, `${isAll ? "Class Summary — All 3 Terms" : `Class Marksheet — ${term}`} · ${grade} / ${cls} · Generated ${todayStr()}`);
+    const gradeNum = grade.replace(/\D/g, "");
+    pdfHeader(doc, `${isAll ? SI.classSummaryAllTerms : `${SI.classMarksheet} \u00b7 ${termLabelSi(term)}`} \u00b7 ${SI.grade} ${gradeNum} / ${SI.classLabel} ${cls} \u00b7 ${SI.generated} ${todayStr()}`);
 
     let head, body, columnStyles;
     if (isAll) {
       const ranking = classRankingOverall(grade, cls);
-      head = [["Student", "Admission No.", "Total (3 terms)", "Overall Avg.", "Grade", "Rank"]];
+      head = [[SI.student, SI.admissionNo, SI.totalThreeTerms, SI.overallAverage, "Grade", SI.rank]];
       body = ranking.map((r) => [r.name, r.admissionNo || "—", String(r.total), round1(r.average) + "%", gradeLetter(r.average) || "—", String(r.rank)]);
       columnStyles = { 0: { halign: "left" } };
     } else {
       const ranking = classRankingForTerm(grade, cls, term);
-      head = [["Student", ...subjects, "Total", "Average", "Rank"]];
+      head = [[SI.student, ...subjects, SI.total, SI.average, SI.rank]];
       body = ranking.map((r) => {
         const marksObj = studentMarks(r.id, term);
         const cells = subjects.map((subj) => {
@@ -1051,27 +1413,27 @@
       styles: { fontSize, cellPadding: 1.8, textColor: BRAND_INK, halign: "center", overflow: "linebreak" },
       headStyles: { fillColor: BRAND_TEAL, textColor: 255, fontSize: Math.min(fontSize + 0.4, 8) },
       alternateRowStyles: { fillColor: BRAND_STRIPE },
-      margin: { left: 10, right: 10 }
+      margin: { left: 10, right: 10 },
+      ...sinhalaCellHooks(doc, fontSize)
     });
 
     const y = doc.lastAutoTable.finalY + 7;
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(7.5);
-    doc.setTextColor(...BRAND_MUTED);
-    doc.text(isAll
-      ? `Total is the sum of term totals across ${subjects.length} subject(s) x 3 terms. Unmarked subjects count as 0.`
-      : "Blank cells mean no mark recorded (counted as 0 in the total).", 14, y);
+    drawText(doc, isAll
+      ? `${SI.totalThreeTerms} — ${subjects.length} \u00d7 3. ${SI.footnoteMarks}`
+      : SI.footnoteMarks, 14, y, { ptSize: 7.5, weight: "400", color: BRAND_MUTED });
 
-    const filename = `${safeFileToken(grade)}_${safeFileToken(cls)}_${isAll ? "AllTerms" : safeFileToken(term)}_ClassReport.pdf`;
+    const filename = `${gradeClassToken(grade, cls)}_${isAll ? "AllTerms" : term.replace(/\s+/g, "")}_ClassReport.pdf`;
     doc.save(filename);
     toast("Report downloaded.");
   }
 
   /* ========================================================
-     DATA / BACKUP
+     DATA / BACKUP / LIVE SYNC
      ======================================================== */
   function renderData() {
+    const syncCard = renderSyncCard();
     return `
+      ${syncCard}
       <div class="card">
         <h2>Export a backup</h2>
         <p class="hint">Saves every grade, class, subject, student and mark into one file you can keep safe or move to another computer.</p>
@@ -1079,18 +1441,71 @@
       </div>
       <div class="card">
         <h2>Restore from a backup</h2>
-        <p class="hint">Choose a previously exported file to replace everything currently stored here.</p>
+        <p class="hint">Choose a previously exported file to replace everything currently stored here${isSyncActive() ? ", and everyone sharing this sync code" : ""}.</p>
         <input type="file" id="import-file" accept="application/json">
       </div>
       <div class="card">
         <h2>Start over</h2>
-        <p class="hint">Permanently erase all classes, students and marks stored on this device.</p>
+        <p class="hint">Permanently erase all classes, students and marks${isSyncActive() ? " for everyone sharing this sync code" : " stored on this device"}.</p>
         <button class="btn btn-danger" id="reset-btn">Erase all data</button>
       </div>
     `;
   }
 
+  function renderSyncCard() {
+    if (!isFirebaseConfigured()) {
+      return `
+        <div class="card">
+          <h2>Live sync with other teachers</h2>
+          <p class="hint">Not set up yet for this school. Cloud sync lets every subject teacher enter marks on their own phone and see one shared, up-to-date class record.</p>
+          <p class="hint">To turn it on, open <b>js/firebase-config.js</b> in the project files — it has a complete 5-minute setup guide (free, no coding). Once that file has your project's details, this card will let you connect.</p>
+        </div>`;
+    }
+    if (isSyncActive()) {
+      return `
+        <div class="card">
+          <h2>Live sync with other teachers</h2>
+          <div class="sync-badge sync-${syncStatus}" data-sync-indicator><span class="dot"></span> ${{ off: "Offline only", connecting: "Connecting…", connected: "Live sync on", error: "Sync error" }[syncStatus]}</div>
+          <p class="hint" style="margin-top:12px;">This device is sharing live data using the code below. Give the same code to every teacher who should see and add to this class's marks — whatever any of you enters appears on everyone's phone automatically.</p>
+          <div class="field" style="max-width:280px;">
+            <label>Shared sync code</label>
+            <input type="text" id="sync-code-display" value="${escapeHtml(syncCode)}" readonly>
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;">
+            <button class="btn btn-ghost btn-sm" id="copy-sync-code">Copy code</button>
+            <button class="btn btn-danger btn-sm" id="disconnect-sync">Disconnect this device</button>
+          </div>
+        </div>`;
+    }
+    return `
+      <div class="card">
+        <h2>Live sync with other teachers</h2>
+        <div class="sync-badge sync-${syncStatus}" data-sync-indicator><span class="dot"></span> ${{ off: "Offline only", connecting: "Connecting…", connected: "Live sync on", error: "Sync error" }[syncStatus]}</div>
+        <p class="hint" style="margin-top:12px;">Enter a shared code to connect this device to the rest of your teaching staff for this class. The first person to connect can share their existing data; everyone after that just joins in.</p>
+        <div class="inline-form">
+          <div class="field"><label>Class sync code</label><input type="text" id="sync-code-input" placeholder="e.g. ubjmv-grade6-2026"></div>
+          <button class="btn btn-primary" id="connect-sync">Connect</button>
+        </div>
+        <p class="hint">Ask your grade coordinator for the code if one already exists — don't invent a new one, or you'll start a separate, empty room.</p>
+      </div>`;
+  }
+
   function attachDataEvents() {
+    const connectBtn = document.getElementById("connect-sync");
+    if (connectBtn) connectBtn.addEventListener("click", () => {
+      startSync(document.getElementById("sync-code-input").value);
+    });
+    const disconnectBtn = document.getElementById("disconnect-sync");
+    if (disconnectBtn) disconnectBtn.addEventListener("click", () => {
+      confirmModal("Disconnect this device from live sync? You'll keep the data already on this device, but stop sending or receiving updates.", stopSync, "Disconnect");
+    });
+    const copyBtn = document.getElementById("copy-sync-code");
+    if (copyBtn) copyBtn.addEventListener("click", () => {
+      const input = document.getElementById("sync-code-display");
+      input.select();
+      navigator.clipboard && navigator.clipboard.writeText(syncCode).then(() => toast("Code copied.")).catch(() => toast("Couldn't copy — select and copy manually."));
+    });
+
     document.getElementById("export-btn").addEventListener("click", () => {
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
@@ -1113,10 +1528,17 @@
         try {
           const parsed = JSON.parse(reader.result);
           if (!parsed.grades || !parsed.students || !parsed.marks) throw new Error("Invalid file");
-          confirmModal("This will replace all current data with the contents of this backup. Continue?", () => {
-            data = parsed;
-            saveData(); render(); toast("Backup restored.");
-          }, "Restore backup");
+          confirmModal(
+            isSyncActive()
+              ? "This will replace all current data with the contents of this backup, for every teacher sharing this sync code. Continue?"
+              : "This will replace all current data with the contents of this backup. Continue?",
+            async () => {
+              data = parsed;
+              saveData(); render(); toast("Backup restored.");
+              if (isSyncActive()) { await syncFullReplace(); toast("Shared data updated for everyone."); }
+            },
+            "Restore backup"
+          );
         } catch (err) {
           toast("That file doesn't look like a valid backup.", "error");
         }
@@ -1126,19 +1548,40 @@
     });
 
     document.getElementById("reset-btn").addEventListener("click", () => {
-      confirmModal("Erase every grade, class, student and mark stored on this device? This cannot be undone.", () => {
-        data = buildDefaultData();
-        saveData(); render(); toast("All data erased.");
-      }, "Erase everything");
+      confirmModal(
+        isSyncActive()
+          ? "Erase every grade, class, student and mark — for every teacher sharing this sync code? This cannot be undone."
+          : "Erase every grade, class, student and mark stored on this device? This cannot be undone.",
+        async () => {
+          data = buildDefaultData();
+          saveData(); render(); toast("All data erased.");
+          if (isSyncActive()) await syncFullReplace();
+        },
+        "Erase everything"
+      );
     });
   }
 
   /* ---------- Boot ---------- */
+  function reconnectSyncOnLaunch() {
+    if (!isFirebaseConfigured() || !syncCode) return;
+    syncStatus = "connecting";
+    try {
+      ensureFirebaseApp();
+      attachSyncListeners();
+    } catch (e) {
+      console.error(e);
+      syncStatus = "error";
+      updateSyncUI();
+    }
+  }
+
   function init() {
     document.querySelectorAll(".nav button").forEach((btn) => {
       btn.addEventListener("click", () => setView(btn.dataset.view));
     });
     render();
+    reconnectSyncOnLaunch();
 
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", () => {

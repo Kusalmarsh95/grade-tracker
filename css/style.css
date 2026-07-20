@@ -2,7 +2,7 @@
    U.B. Jayasooriya Maha Vidyalaya — Grade Tracker
    Design tokens
    ========================================================= */
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Work+Sans:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Work+Sans:wght@400;500;600;700&family=Noto+Sans+Sinhala:wght@400;600;700&display=swap');
 
 :root{
   --ink:#16302C;
@@ -411,6 +411,28 @@ tbody tr:hover{ background:#FAFBF9; }
   display:flex; align-items:center; justify-content:space-between;
   gap:12px; margin-bottom:20px; font-size:0.86rem;
 }
+
+/* =========================================================
+   Live sync status badge
+   ========================================================= */
+.sync-badge{
+  display:inline-flex; align-items:center; gap:7px;
+  padding:6px 13px;
+  border-radius:20px;
+  font-size:0.78rem;
+  font-weight:600;
+  white-space:nowrap;
+}
+.sync-badge .dot{ width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+.sync-off{ background:var(--surface-alt); color:var(--muted); }
+.sync-off .dot{ background:var(--muted); }
+.sync-connecting{ background:var(--accent-soft); color:var(--accent-deep); }
+.sync-connecting .dot{ background:var(--accent-deep); animation:sync-pulse 1s ease-in-out infinite; }
+.sync-connected{ background:var(--success-soft); color:var(--success); }
+.sync-connected .dot{ background:var(--success); }
+.sync-error{ background:var(--danger-soft); color:var(--danger); }
+.sync-error .dot{ background:var(--danger); }
+@keyframes sync-pulse{ 0%, 100% { opacity:1; } 50% { opacity:0.25; } }
 
 /* =========================================================
    Responsive: sidebar -> bottom nav on small screens
