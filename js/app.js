@@ -87,7 +87,22 @@
   }
 
   function isSyncActive() {
-    return isFirebaseConfigured() && !!syncCode && !!db;
+    return isFirebaseConfigured() && !!syncCode && !!db && syncStatus !== "error";
+  }
+
+  let syncLastError = "";
+
+  function friendlySyncError(err) {
+    const code = err && err.code;
+    const map = {
+      "permission-denied": "Firestore is blocking access. In the Firebase console, open Firestore Database \u2192 Rules, make sure they match the setup guide, and click Publish.",
+      "unavailable": "Couldn't reach Firebase \u2014 check this device's internet connection and try again.",
+      "not-found": "This Firebase project doesn't seem to have a Firestore database yet. In the console, open Firestore Database and click \"Create database\".",
+      "failed-precondition": "Firestore isn't fully set up for this project yet \u2014 check that Firestore Database is created and the rules are published.",
+      "unauthenticated": "Firebase rejected this device \u2014 double-check the values in js/firebase-config.js match your Firebase project exactly."
+    };
+    if (code && map[code]) return map[code];
+    return (err && err.message) ? err.message : "Unknown error \u2014 please share this message so it can be diagnosed.";
   }
 
   function ensureFirebaseApp() {
@@ -110,21 +125,22 @@
   function attachSyncListeners() {
     const unsubConfig = configDocRef().onSnapshot((doc) => {
       syncStatus = "connected";
+      syncLastError = "";
       if (doc.exists && doc.data().grades) data.grades = doc.data().grades;
       saveData(); updateSyncUI(); render();
-    }, (err) => { syncStatus = "error"; updateSyncUI(); console.error(err); });
+    }, (err) => { syncStatus = "error"; syncLastError = friendlySyncError(err); updateSyncUI(); console.error(err); });
 
     const unsubStudents = studentsCol().onSnapshot((snap) => {
       data.students = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       saveData(); render();
-    }, (err) => console.error(err));
+    }, (err) => { syncStatus = "error"; syncLastError = friendlySyncError(err); updateSyncUI(); console.error(err); });
 
     const unsubMarks = marksCol().onSnapshot((snap) => {
       const marks = {};
       snap.docs.forEach((d) => { marks[d.id] = d.data(); });
       data.marks = marks;
       saveData(); render();
-    }, (err) => console.error(err));
+    }, (err) => { syncStatus = "error"; syncLastError = friendlySyncError(err); updateSyncUI(); console.error(err); });
 
     syncUnsubscribers = [unsubConfig, unsubStudents, unsubMarks];
   }
@@ -155,6 +171,7 @@
     localStorage.setItem(SYNC_CODE_KEY, syncCode);
     localStorage.removeItem(SYNC_SKIPPED_KEY);
     syncStatus = "connecting";
+    syncLastError = "";
     updateSyncUI();
 
     try {
@@ -173,8 +190,9 @@
     } catch (e) {
       console.error(e);
       syncStatus = "error";
+      syncLastError = friendlySyncError(e);
       updateSyncUI();
-      toast("Could not reach the cloud. Check your internet connection and try again.", "error");
+      toast("Could not connect — see the error details on the Data & Sync tab.", "error");
     }
   }
 
@@ -612,7 +630,8 @@
       const q = sel.q.toLowerCase();
       list = list.filter((s) => s.name.toLowerCase().includes(q) || (s.admissionNo || "").toLowerCase().includes(q));
     }
-    list = [...list].sort((a, b) => a.name.localeCompare(b.name));
+    // Preserve the order students were added in (e.g. the order typed into
+    // "Add several at once"), rather than forcing alphabetical order.
 
     const rows = list.map((s) => `
       <tr>
@@ -772,7 +791,7 @@
 
     const subjects = data.grades[sel.grade].subjects;
     if (!sel.subject || (sel.subject !== "ALL" && !subjects.includes(sel.subject))) sel.subject = subjects[0] || "ALL";
-    const students = [...getStudentsFor(sel.grade, sel.cls)].sort((a, b) => a.name.localeCompare(b.name));
+    const students = getStudentsFor(sel.grade, sel.cls);
 
     const classOptions = data.grades[sel.grade].classes.map((c) => `<option ${c === sel.cls ? "selected" : ""}>${escapeHtml(c)}</option>`).join("");
 
@@ -895,7 +914,7 @@
     </div>`;
 
     if (tab === "individual") {
-      const studentsInClass = [...getStudentsFor(selInd.grade, selInd.cls)].sort((a, b) => a.name.localeCompare(b.name));
+      const studentsInClass = getStudentsFor(selInd.grade, selInd.cls);
       if (!selInd.studentId && studentsInClass.length) selInd.studentId = studentsInClass[0].id;
 
       return `${tabs}
@@ -1111,10 +1130,8 @@
       </div>`;
   }
 
-  const BRAND_TEAL = [21, 74, 70];
-  const BRAND_INK = [22, 48, 44];
-  const BRAND_MUTED = [108, 134, 129];
-  const BRAND_STRIPE = [240, 246, 244];
+  const PDF_INK = [25, 25, 25];
+  const PDF_MUTED = [110, 110, 110];
 
   const SI = {
     studentProgressReport: "ශිෂ්‍ය ප්‍රගති වාර්තාව",
@@ -1133,6 +1150,7 @@
     classMarksheet: "පන්ති ලකුණු ලේඛනය",
     classSummaryAllTerms: "පන්ති සාරාංශය — වාර 3ම",
     generated: "සකස් කළ දිනය",
+    letterGrade: "ශ්‍රේණිය",
     footnoteMarks: "ලකුණු ඇතුළත් නොකළ විෂයයන් 0ක් ලෙස ගණන් කෙරේ.",
     footnoteGradeBands: "ශ්‍රේණි සීමා: A \u226575, B \u226565, C \u226550, S \u226535, W <35"
   };
@@ -1177,22 +1195,19 @@
     return /[^\x00-\x7F]/.test(String(text));
   }
 
-  let sinhalaFontReadyPromise = null;
-  function ensureSinhalaFontLoaded() {
-    if (!sinhalaFontReadyPromise) {
-      sinhalaFontReadyPromise = (async () => {
-        try {
-          if (document.fonts && document.fonts.load) {
-            await Promise.all([
-              document.fonts.load('400 32px "Noto Sans Sinhala"'),
-              document.fonts.load('700 32px "Noto Sans Sinhala"')
-            ]);
-          }
-          if (document.fonts && document.fonts.ready) await document.fonts.ready;
-        } catch (e) { console.warn("Sinhala font preload check failed", e); }
-      })();
-    }
-    return sinhalaFontReadyPromise;
+  function ensureSinhalaFontLoaded(sampleText) {
+    const text = SCHOOL_NAME_SI + " " + Object.values(SI).join(" ") + " " + (sampleText || "") + " 0123456789";
+    return (async () => {
+      try {
+        if (document.fonts && document.fonts.load) {
+          await Promise.all([
+            document.fonts.load('400 32px "Noto Sans Sinhala"', text),
+            document.fonts.load('700 32px "Noto Sans Sinhala"', text)
+          ]);
+        }
+        if (document.fonts && document.fonts.ready) await document.fonts.ready;
+      } catch (e) { console.warn("Sinhala font preload check failed", e); }
+    })();
   }
 
   const _textImageCache = new Map();
@@ -1250,15 +1265,22 @@
     if (!needsImageRender(str)) {
       doc.setFont("helvetica", opts.weight === "700" ? "bold" : "normal");
       doc.setFontSize(opts.ptSize || 10);
-      doc.setTextColor(...(opts.color || BRAND_INK));
+      doc.setTextColor(...(opts.color || PDF_INK));
       doc.text(str, x, y, { align });
       return;
     }
-    const img = renderTextToImage(str, opts.ptSize || 10, { weight: opts.weight || "400", colorHex: opts.colorHex || rgbToHex(opts.color || BRAND_INK) });
+    const img = renderTextToImage(str, opts.ptSize || 10, { weight: opts.weight || "400", colorHex: opts.colorHex || rgbToHex(opts.color || PDF_INK) });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const maxW = Math.max(10, pageWidth - x - 10);
+    let w = img.widthMM, h = img.heightMM, baseline = img.baselineMM;
+    if (w > maxW) {
+      const scale = maxW / w;
+      w *= scale; h *= scale; baseline *= scale;
+    }
     let imgX = x;
-    if (align === "center") imgX = x - img.widthMM / 2;
-    else if (align === "right") imgX = x - img.widthMM;
-    doc.addImage(img.dataUrl, "PNG", imgX, y - img.baselineMM, img.widthMM, img.heightMM);
+    if (align === "center") imgX = x - w / 2;
+    else if (align === "right") imgX = x - w;
+    doc.addImage(img.dataUrl, "PNG", imgX, y - baseline, w, h);
   }
 
   // autoTable hooks: any cell whose raw value contains non-ASCII text is
@@ -1277,7 +1299,7 @@
         if (!needsImageRender(str)) return;
         const isHead = d.section === "head";
         const weight = isHead || (d.cell.styles && d.cell.styles.fontStyle === "bold") ? "700" : "400";
-        const colorHex = isHead ? "#FFFFFF" : "#16302C";
+        const colorHex = "#191919";
         const ptSize = (d.cell.styles && d.cell.styles.fontSize) || baseFontSize;
         const img = renderTextToImage(str, ptSize, { weight, colorHex });
         const padL = d.cell.padding("left");
@@ -1299,10 +1321,10 @@
   }
 
   function pdfHeader(doc, subtitle) {
-    drawText(doc, SCHOOL_NAME_SI, 14, 16, { ptSize: 15, weight: "700", color: BRAND_INK });
-    drawText(doc, subtitle, 14, 22, { ptSize: 9.5, weight: "400", color: BRAND_MUTED });
-    doc.setDrawColor(...BRAND_TEAL);
-    doc.setLineWidth(0.6);
+    drawText(doc, SCHOOL_NAME_SI, 14, 16, { ptSize: 15, weight: "700", color: PDF_INK });
+    drawText(doc, subtitle, 14, 22, { ptSize: 9.5, weight: "400", color: PDF_MUTED });
+    doc.setDrawColor(...PDF_INK);
+    doc.setLineWidth(0.5);
     const pageWidth = doc.internal.pageSize.getWidth();
     doc.line(14, 26, pageWidth - 14, 26);
   }
@@ -1312,9 +1334,9 @@
     if (!jsPDFCtor) return;
     const st = data.students.find((s) => s.id === studentId);
     if (!st) return toast("Select a student first.", "error");
-    await ensureSinhalaFontLoaded();
-
     const subjects = data.grades[st.grade].subjects;
+    await ensureSinhalaFontLoaded(subjects.join(" ") + " " + st.name + " " + (st.admissionNo || ""));
+
     const ranking = classRankingOverall(st.grade, st.cls);
     const overallRankRow = ranking.find((r) => r.id === studentId);
     const overall = computeStudentOverallStats(studentId, st.grade);
@@ -1337,33 +1359,44 @@
     const doc = new jsPDFCtor({ orientation: "portrait", unit: "mm", format: "a4" });
     pdfHeader(doc, `${SI.studentProgressReport} \u00b7 ${SI.generated} ${todayStr()}`);
 
-    drawText(doc, st.name, 14, 34, { ptSize: 11, weight: "700", color: BRAND_INK });
-    drawText(doc, `${SI.admissionNo}: ${st.admissionNo || "—"}`, 14, 40, { ptSize: 9.5, weight: "400", color: BRAND_INK });
-    drawText(doc, `${SI.grade} ${st.grade.replace(/\D/g, "")}  \u00b7  ${SI.classLabel} ${st.cls}`, 110, 40, { ptSize: 9.5, weight: "400", color: BRAND_INK });
+    drawText(doc, st.name, 14, 34, { ptSize: 11, weight: "700", color: PDF_INK });
+    drawText(doc, `${SI.admissionNo}: ${st.admissionNo || "—"}`, 14, 40, { ptSize: 9.5, weight: "400", color: PDF_INK });
+    drawText(doc, `${SI.grade} ${st.grade.replace(/\D/g, "")}  \u00b7  ${SI.classLabel} ${st.cls}`, 110, 40, { ptSize: 9.5, weight: "400", color: PDF_INK });
+
+    const usableW = doc.internal.pageSize.getWidth() - 28; // matches the 14mm left/right margin used throughout
+    const subjColW = usableW * 0.34;
+    const otherColW = (usableW - subjColW) / 5;
 
     doc.autoTable({
       startY: 46,
-      head: [[SI.subject, ...TERMS.map(termLabelSi), SI.average, "Grade"]],
+      head: [[SI.subject, ...TERMS.map(termLabelSi), SI.average, SI.letterGrade]],
       body,
       theme: "grid",
-      styles: { fontSize: 9.5, cellPadding: 2.6, textColor: BRAND_INK },
-      headStyles: { fillColor: BRAND_TEAL, textColor: 255, fontSize: 9.5 },
-      alternateRowStyles: { fillColor: BRAND_STRIPE },
-      columnStyles: { 0: { halign: "left" }, 1: { halign: "center" }, 2: { halign: "center" }, 3: { halign: "center" }, 4: { halign: "center", fontStyle: "bold" }, 5: { halign: "center" } },
+      tableWidth: usableW,
+      styles: { fontSize: 9.5, cellPadding: 2.6, textColor: PDF_INK, lineColor: [190, 190, 190], lineWidth: 0.15, overflow: "linebreak" },
+      headStyles: { textColor: PDF_INK, fontStyle: "bold", fontSize: 9.5 },
+      columnStyles: {
+        0: { halign: "left", cellWidth: subjColW },
+        1: { halign: "center", cellWidth: otherColW },
+        2: { halign: "center", cellWidth: otherColW },
+        3: { halign: "center", cellWidth: otherColW },
+        4: { halign: "center", cellWidth: otherColW, fontStyle: "bold" },
+        5: { halign: "center", cellWidth: otherColW }
+      },
       ...sinhalaCellHooks(doc, 9.5)
     });
 
     let y = doc.lastAutoTable.finalY + 9;
-    drawText(doc, SI.termSummary, 14, y, { ptSize: 10, weight: "700", color: BRAND_TEAL });
+    drawText(doc, SI.termSummary, 14, y, { ptSize: 10, weight: "700", color: PDF_INK });
     y += 6;
     TERMS.forEach((t, i) => {
       const rankRow = termRankings[i].find((r) => r.id === studentId);
-      drawText(doc, `${termLabelSi(t)}:  ${SI.total} ${termStats[i].total}  \u00b7  ${SI.rank} ${rankRow ? rankRow.rank : "—"} / ${termRankings[i].length}`, 14, y, { ptSize: 10, weight: "400", color: BRAND_INK });
+      drawText(doc, `${termLabelSi(t)}:  ${SI.total} ${termStats[i].total}  \u00b7  ${SI.rank} ${rankRow ? rankRow.rank : "—"} / ${termRankings[i].length}`, 14, y, { ptSize: 10, weight: "400", color: PDF_INK });
       y += 6;
     });
-    drawText(doc, `${SI.overallAverage}: ${round1(overall.average)}%  \u00b7  ${SI.overallRank} ${overallRankRow ? overallRankRow.rank : "—"} / ${ranking.length}`, 14, y + 2, { ptSize: 10, weight: "700", color: BRAND_INK });
+    drawText(doc, `${SI.overallAverage}: ${round1(overall.average)}%  \u00b7  ${SI.overallRank} ${overallRankRow ? overallRankRow.rank : "—"} / ${ranking.length}`, 14, y + 2, { ptSize: 10, weight: "700", color: PDF_INK });
 
-    drawText(doc, SI.footnoteMarks + "  " + SI.footnoteGradeBands, 14, y + 10, { ptSize: 7.5, weight: "400", color: BRAND_MUTED });
+    drawText(doc, SI.footnoteMarks + "  " + SI.footnoteGradeBands, 14, y + 10, { ptSize: 7.5, weight: "400", color: PDF_MUTED });
 
     const filename = `${safeFileToken(st.name)}_${gradeClassToken(st.grade, st.cls)}_Report.pdf`;
     doc.save(filename);
@@ -1375,8 +1408,8 @@
     if (!jsPDFCtor) return;
     const students = getStudentsFor(grade, cls);
     if (!students.length) return toast("No students in this class yet.", "error");
-    await ensureSinhalaFontLoaded();
     const subjects = data.grades[grade].subjects;
+    await ensureSinhalaFontLoaded(subjects.join(" ") + " " + students.map((s) => s.name).join(" "));
 
     const doc = new jsPDFCtor({ orientation: "landscape", unit: "mm", format: "a4" });
     const isAll = term === "ALL";
@@ -1386,7 +1419,7 @@
     let head, body, columnStyles;
     if (isAll) {
       const ranking = classRankingOverall(grade, cls);
-      head = [[SI.student, SI.admissionNo, SI.totalThreeTerms, SI.overallAverage, "Grade", SI.rank]];
+      head = [[SI.student, SI.admissionNo, SI.totalThreeTerms, SI.overallAverage, SI.letterGrade, SI.rank]];
       body = ranking.map((r) => [r.name, r.admissionNo || "—", String(r.total), round1(r.average) + "%", gradeLetter(r.average) || "—", String(r.rank)]);
       columnStyles = { 0: { halign: "left" } };
     } else {
@@ -1405,14 +1438,19 @@
 
     const colCount = head[0].length;
     const fontSize = colCount > 16 ? 6.5 : colCount > 13 ? 7.2 : colCount > 10 ? 8 : 9;
+    const usableW = doc.internal.pageSize.getWidth() - 20; // matches margin left/right 10 below
+    const studentColW = Math.max(usableW * 0.15, 24);
+    const otherColW = (usableW - studentColW) / (colCount - 1);
+    columnStyles[0] = { ...columnStyles[0], cellWidth: studentColW };
+    for (let i = 1; i < colCount; i++) columnStyles[i] = { ...columnStyles[i], cellWidth: otherColW };
 
     doc.autoTable({
       startY: 32,
       head, body, columnStyles,
       theme: "grid",
-      styles: { fontSize, cellPadding: 1.8, textColor: BRAND_INK, halign: "center", overflow: "linebreak" },
-      headStyles: { fillColor: BRAND_TEAL, textColor: 255, fontSize: Math.min(fontSize + 0.4, 8) },
-      alternateRowStyles: { fillColor: BRAND_STRIPE },
+      tableWidth: usableW,
+      styles: { fontSize, cellPadding: 1.8, textColor: PDF_INK, halign: "center", overflow: "linebreak", lineColor: [190, 190, 190], lineWidth: 0.15 },
+      headStyles: { textColor: PDF_INK, fontStyle: "bold", fontSize: Math.min(fontSize + 0.4, 8) },
       margin: { left: 10, right: 10 },
       ...sinhalaCellHooks(doc, fontSize)
     });
@@ -1420,7 +1458,7 @@
     const y = doc.lastAutoTable.finalY + 7;
     drawText(doc, isAll
       ? `${SI.totalThreeTerms} — ${subjects.length} \u00d7 3. ${SI.footnoteMarks}`
-      : SI.footnoteMarks, 14, y, { ptSize: 7.5, weight: "400", color: BRAND_MUTED });
+      : SI.footnoteMarks, 14, y, { ptSize: 7.5, weight: "400", color: PDF_MUTED });
 
     const filename = `${gradeClassToken(grade, cls)}_${isAll ? "AllTerms" : term.replace(/\s+/g, "")}_ClassReport.pdf`;
     doc.save(filename);
@@ -1572,6 +1610,7 @@
     } catch (e) {
       console.error(e);
       syncStatus = "error";
+      syncLastError = friendlySyncError(e);
       updateSyncUI();
     }
   }
