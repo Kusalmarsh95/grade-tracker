@@ -1,4 +1,4 @@
-const CACHE_NAME = "ubjmv-grade-tracker-v3";
+const CACHE_NAME = "ubjmv-grade-tracker-v5";
 const ASSETS = [
   "./",
   "./index.html",
@@ -10,12 +10,17 @@ const ASSETS = [
   "./icons/icon-512.png",
   "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js",
   "https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js",
+  "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js",
   "https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js",
   "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"
 ];
 
 // Resolve to absolute URLs up front so fetch-time comparisons are exact.
 const ASSET_URLS = new Set(ASSETS.map((a) => new URL(a, self.location).href));
+
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "SKIP_WAITING") self.skipWaiting();
+});
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

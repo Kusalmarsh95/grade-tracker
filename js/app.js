@@ -926,6 +926,7 @@
             <div class="field"><label>Class</label><select id="rep-ind-class">${data.grades[selInd.grade].classes.map((c) => `<option ${c === selInd.cls ? "selected" : ""}>${escapeHtml(c)}</option>`).join("")}</select></div>
             <div class="field"><label>Student</label><select id="rep-ind-student">${studentsInClass.map((s) => `<option value="${s.id}" ${s.id === selInd.studentId ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}</select></div>
             <button class="btn btn-accent" id="rep-ind-download" ${!selInd.studentId ? "disabled" : ""}>⬇ Download PDF report</button>
+            <button class="btn btn-ghost" id="rep-ind-download-xlsx" ${!selInd.studentId ? "disabled" : ""}>⬇ Download Excel</button>
           </div>
           ${selInd.studentId ? `<div id="rep-ind-preview">${buildStudentReportHtml(selInd.studentId, false)}</div>` : `<div class="empty-state"><p>No students in this class yet.</p></div>`}
         </div>`;
@@ -941,6 +942,7 @@
           <div class="field"><label>Class</label><select id="rep-cls-class">${data.grades[selCls.grade].classes.map((c) => `<option ${c === selCls.cls ? "selected" : ""}>${escapeHtml(c)}</option>`).join("")}</select></div>
           <div class="field"><label>Term</label><select id="rep-cls-term">${TERMS.map((t) => `<option ${t === selCls.term ? "selected" : ""}>${t}</option>`).join("")}<option value="ALL" ${selCls.term === "ALL" ? "selected" : ""}>All terms (summary)</option></select></div>
           <button class="btn btn-accent" id="rep-cls-download" ${!studentsForClassReport.length ? "disabled" : ""}>⬇ Download PDF report</button>
+          <button class="btn btn-ghost" id="rep-cls-download-xlsx" ${!studentsForClassReport.length ? "disabled" : ""}>⬇ Download Excel</button>
         </div>
         <div id="rep-cls-preview">${buildClassReportHtml(selCls.grade, selCls.cls, selCls.term, false)}</div>
       </div>`;
@@ -967,6 +969,8 @@
         toast("Preparing report…");
         try { await generateStudentReportPdf(selInd.studentId); } finally { dl.disabled = false; }
       });
+      const dlXlsx = document.getElementById("rep-ind-download-xlsx");
+      if (dlXlsx) dlXlsx.addEventListener("click", () => generateStudentReportExcel(selInd.studentId));
     } else {
       const selCls = state.selections.reportCls;
       document.getElementById("rep-cls-grade").addEventListener("change", (e) => {
@@ -980,6 +984,8 @@
         toast("Preparing report…");
         try { await generateClassReportPdf(selCls.grade, selCls.cls, selCls.term); } finally { dl.disabled = false; }
       });
+      const dlXlsx = document.getElementById("rep-cls-download-xlsx");
+      if (dlXlsx) dlXlsx.addEventListener("click", () => generateClassReportExcel(selCls.grade, selCls.cls, selCls.term));
     }
   }
 
@@ -1166,6 +1172,116 @@
       return null;
     }
     return window.jspdf.jsPDF;
+  }
+
+  function getXlsxLib() {
+    if (!window.XLSX) {
+      toast("Excel tools haven't finished loading yet — please check your connection and try again in a moment.", "error");
+      return null;
+    }
+    return window.XLSX;
+  }
+
+  function generateStudentReportExcel(studentId) {
+    const XLSX = getXlsxLib();
+    if (!XLSX) return;
+    const st = data.students.find((s) => s.id === studentId);
+    if (!st) return toast("Select a student first.", "error");
+
+    const subjects = data.grades[st.grade].subjects;
+    const ranking = classRankingOverall(st.grade, st.cls);
+    const overallRankRow = ranking.find((r) => r.id === studentId);
+    const overall = computeStudentOverallStats(studentId, st.grade);
+    const termStats = TERMS.map((t) => computeStudentTermStats(studentId, st.grade, t));
+    const termRankings = TERMS.map((t) => classRankingForTerm(st.grade, st.cls, t));
+
+    const rows = [];
+    rows.push([SCHOOL_NAME_SI]);
+    rows.push([`${SI.studentProgressReport} \u00b7 ${SI.generated} ${todayStr()}`]);
+    rows.push([]);
+    rows.push([SI.student, st.name, SI.admissionNo, st.admissionNo || ""]);
+    rows.push([SI.grade, st.grade.replace(/\D/g, ""), SI.classLabel, st.cls]);
+    rows.push([]);
+    rows.push([SI.subject, ...TERMS.map(termLabelSi), SI.average, SI.letterGrade]);
+
+    subjects.forEach((subj) => {
+      const marksByTerm = TERMS.map((t) => studentMarks(studentId, t)[subj]);
+      const validMarks = marksByTerm.filter((v) => v !== undefined && v !== null && v !== "");
+      const subjAvg = validMarks.length ? validMarks.reduce((a, b) => a + Number(b), 0) / validMarks.length : null;
+      const g = gradeLetter(subjAvg);
+      rows.push([
+        subj,
+        ...marksByTerm.map((v) => (v !== undefined && v !== null && v !== "" ? Number(v) : "")),
+        subjAvg !== null ? round1(subjAvg) : "",
+        g || ""
+      ]);
+    });
+
+    rows.push([]);
+    rows.push([SI.termSummary]);
+    rows.push(["", SI.total, SI.rank]);
+    TERMS.forEach((t, i) => {
+      const rankRow = termRankings[i].find((r) => r.id === studentId);
+      rows.push([termLabelSi(t), termStats[i].total, rankRow ? `${rankRow.rank} / ${termRankings[i].length}` : "—"]);
+    });
+    rows.push([]);
+    rows.push([SI.overallAverage, round1(overall.average) + "%", SI.overallRank, overallRankRow ? `${overallRankRow.rank} / ${ranking.length}` : "—"]);
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws["!cols"] = [{ wch: 26 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 10 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Report");
+    const filename = `${safeFileToken(st.name)}_${gradeClassToken(st.grade, st.cls)}_Report.xlsx`;
+    XLSX.writeFile(wb, filename);
+    toast("Excel report downloaded.");
+  }
+
+  function generateClassReportExcel(grade, cls, term) {
+    const XLSX = getXlsxLib();
+    if (!XLSX) return;
+    const students = getStudentsFor(grade, cls);
+    if (!students.length) return toast("No students in this class yet.", "error");
+    const subjects = data.grades[grade].subjects;
+    const isAll = term === "ALL";
+    const gradeNum = grade.replace(/\D/g, "");
+
+    const rows = [];
+    rows.push([SCHOOL_NAME_SI]);
+    rows.push([`${isAll ? SI.classSummaryAllTerms : `${SI.classMarksheet} \u00b7 ${termLabelSi(term)}`} \u00b7 ${SI.grade} ${gradeNum} / ${SI.classLabel} ${cls} \u00b7 ${SI.generated} ${todayStr()}`]);
+    rows.push([]);
+
+    const wb = XLSX.utils.book_new();
+    let filename;
+
+    if (isAll) {
+      const ranking = classRankingOverall(grade, cls);
+      rows.push([SI.student, SI.admissionNo, SI.totalThreeTerms, SI.overallAverage, SI.letterGrade, SI.rank]);
+      ranking.forEach((r) => {
+        rows.push([r.name, r.admissionNo || "", r.total, round1(r.average), gradeLetter(r.average) || "", r.rank]);
+      });
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      ws["!cols"] = [{ wch: 22 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 10 }, { wch: 8 }];
+      XLSX.utils.book_append_sheet(wb, ws, "Class Summary");
+      filename = `${gradeClassToken(grade, cls)}_AllTerms_ClassReport.xlsx`;
+    } else {
+      const ranking = classRankingForTerm(grade, cls, term);
+      rows.push([SI.student, ...subjects, SI.total, SI.average, SI.rank]);
+      ranking.forEach((r) => {
+        const marksObj = studentMarks(r.id, term);
+        const cells = subjects.map((subj) => {
+          const v = marksObj[subj];
+          return v !== undefined && v !== null && v !== "" ? Number(v) : "";
+        });
+        rows.push([r.name, ...cells, r.total, round1(r.average), r.rank]);
+      });
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      ws["!cols"] = [{ wch: 22 }, ...subjects.map(() => ({ wch: 12 })), { wch: 10 }, { wch: 10 }, { wch: 8 }];
+      XLSX.utils.book_append_sheet(wb, ws, "Class Marksheet");
+      filename = `${gradeClassToken(grade, cls)}_${term.replace(/\s+/g, "")}_ClassReport.xlsx`;
+    }
+
+    XLSX.writeFile(wb, filename);
+    toast("Excel report downloaded.");
   }
 
   function safeFileToken(str) {
@@ -1624,7 +1740,24 @@
 
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", () => {
-        navigator.serviceWorker.register("service-worker.js").catch((err) => console.warn("SW registration failed", err));
+        navigator.serviceWorker.register("service-worker.js").then((registration) => {
+          // Force an immediate check for a newer service-worker.js instead of
+          // waiting for the browser's own (sometimes lazy) periodic check.
+          registration.update().catch(() => {});
+          // If a new version is already waiting (e.g. this tab was open when
+          // it arrived), nudge it to activate right away.
+          if (registration.waiting) registration.waiting.postMessage({ type: "SKIP_WAITING" });
+          registration.addEventListener("updatefound", () => {
+            const newWorker = registration.installing;
+            if (!newWorker) return;
+            newWorker.addEventListener("statechange", () => {
+              if (newWorker.state === "installed" && navigator.serviceWorker.controller) {
+                toast("A newer version is ready — refreshing…");
+                setTimeout(() => window.location.reload(), 800);
+              }
+            });
+          });
+        }).catch((err) => console.warn("SW registration failed", err));
       });
     }
   }
