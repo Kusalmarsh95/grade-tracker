@@ -345,7 +345,10 @@
       if (r[key] !== prevVal) { rank = pos; prevVal = r[key]; }
       r.rank = rank;
     });
-    return sorted;
+    // Rank is computed above, but rows are returned in their original
+    // (student-entry) order rather than sorted by rank — reports list
+    // students the way they were added, with rank shown as a column.
+    return rows;
   }
 
   function classRankingForTerm(grade, cls, term) {
