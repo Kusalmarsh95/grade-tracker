@@ -1305,17 +1305,17 @@
       filename = `${gradeClassToken(grade, cls)}_AllTerms_ClassReport.xlsx`;
     } else {
       const ranking = classRankingForTerm(grade, cls, term);
-      rows.push([SI.student, ...subjects, SI.total, SI.average, SI.rank]);
+      rows.push([SI.student, SI.admissionNo, ...subjects, SI.total, SI.average, SI.rank]);
       ranking.forEach((r) => {
         const marksObj = studentMarks(r.id, term);
         const cells = subjects.map((subj) => {
           const v = marksObj[subj];
           return v !== undefined && v !== null && v !== "" ? Number(v) : "";
         });
-        rows.push([r.name, ...cells, r.total, round1(r.average), r.rank]);
+        rows.push([r.name, r.admissionNo || "", ...cells, r.total, round1(r.average), r.rank]);
       });
       const ws = XLSX.utils.aoa_to_sheet(rows);
-      ws["!cols"] = [{ wch: 22 }, ...subjects.map(() => ({ wch: 12 })), { wch: 10 }, { wch: 10 }, { wch: 8 }];
+      ws["!cols"] = [{ wch: 22 }, { wch: 14 }, ...subjects.map(() => ({ wch: 12 })), { wch: 10 }, { wch: 10 }, { wch: 8 }];
       XLSX.utils.book_append_sheet(wb, ws, "Class Marksheet");
       filename = `${gradeClassToken(grade, cls)}_${term.replace(/\s+/g, "")}_ClassReport.xlsx`;
     }
