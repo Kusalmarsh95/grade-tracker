@@ -1120,11 +1120,11 @@
 
     const ranking = classRankingForTerm(grade, cls, term);
 
-    // Total columns = student name + one per subject + total + average + rank.
+    // Total columns = student name + admission no. + one per subject + total + average + rank.
     // For print we force the table to a fixed layout that always sums to 100%
     // of the page width, so columns shrink to fit instead of being clipped
     // off the right edge when there are many subjects.
-    const totalCols = 1 + subjects.length + 3;
+    const totalCols = 2 + subjects.length + 3;
     let printFontSize = "0.82rem", printPad = "8px 9px";
     if (forPrint) {
       if (totalCols > 15) { printFontSize = "6.6px"; printPad = "3px 3px"; }
@@ -1133,11 +1133,13 @@
       else { printFontSize = "9.5px"; printPad = "5px 6px"; }
     }
     const studentColPct = Math.max(10, Math.min(16, 100 / totalCols + 6));
-    const otherColPct = (100 - studentColPct) / (totalCols - 1);
+    const admissionColPct = Math.max(8, Math.min(12, 100 / totalCols + 2));
+    const otherColPct = (100 - studentColPct - admissionColPct) / (totalCols - 2);
     const printTableStyle = forPrint
       ? `style="table-layout:fixed;width:100%;font-size:${printFontSize};"`
       : "";
     const studentColStyle = forPrint ? `style="width:${studentColPct}%;padding:${printPad};word-break:break-word;"` : "";
+    const admissionColStyle = forPrint ? `style="width:${admissionColPct}%;padding:${printPad};word-break:break-word;text-align:center;"` : "";
     const otherColStyle = forPrint ? `style="width:${otherColPct}%;padding:${printPad};word-break:break-word;text-align:center;"` : "";
 
     const rowsHtml = ranking.map((r) => {
@@ -1148,6 +1150,7 @@
       }).join("");
       return `<tr>
         <td ${studentColStyle}>${escapeHtml(r.name)}</td>
+        <td ${admissionColStyle || 'style="text-align:center;"'}>${escapeHtml(r.admissionNo || "—")}</td>
         ${cells}
         <td ${otherColStyle}><b>${r.total}</b></td>
         <td ${otherColStyle}>${round1(r.average)}%</td>
@@ -1162,7 +1165,7 @@
           <div><h2>${escapeHtml(SCHOOL_NAME)}</h2><div class="meta">Class Marksheet — ${escapeHtml(grade)} / ${escapeHtml(cls)} · ${escapeHtml(term)} · Generated ${todayStr()}</div></div>
         </div>
         <div class="table-wrap"><table ${printTableStyle}>
-          <thead><tr><th ${studentColStyle || 'style="text-align:left;"'}>Student</th>${subjects.map((s) => `<th ${otherColStyle}>${escapeHtml(s)}</th>`).join("")}<th ${otherColStyle}>Total</th><th ${otherColStyle}>Average</th><th ${otherColStyle}>Rank</th></tr></thead>
+          <thead><tr><th ${studentColStyle || 'style="text-align:left;"'}>Student</th><th ${admissionColStyle || 'style="text-align:center;"'}>Admission No.</th>${subjects.map((s) => `<th ${otherColStyle}>${escapeHtml(s)}</th>`).join("")}<th ${otherColStyle}>Total</th><th ${otherColStyle}>Average</th><th ${otherColStyle}>Rank</th></tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table></div>
         ${forPrint ? `<p style="margin-top:18px;font-size:0.72rem;color:var(--muted);">Blank cells mean no mark recorded (counted as 0 in the total).</p>` : ""}
@@ -1577,25 +1580,28 @@
       columnStyles = { 0: { halign: "left" } };
     } else {
       const ranking = classRankingForTerm(grade, cls, term);
-      head = [[SI.student, ...subjects, SI.total, SI.average, SI.rank]];
+      head = [[SI.student, SI.admissionNo, ...subjects, SI.total, SI.average, SI.rank]];
       body = ranking.map((r) => {
         const marksObj = studentMarks(r.id, term);
         const cells = subjects.map((subj) => {
           const v = marksObj[subj];
           return v !== undefined && v !== null && v !== "" ? String(v) : "—";
         });
-        return [r.name, ...cells, String(r.total), round1(r.average) + "%", String(r.rank)];
+        return [r.name, r.admissionNo || "—", ...cells, String(r.total), round1(r.average) + "%", String(r.rank)];
       });
-      columnStyles = { 0: { halign: "left" } };
+      columnStyles = { 0: { halign: "left" }, 1: { halign: "center" } };
     }
 
     const colCount = head[0].length;
     const fontSize = colCount > 16 ? 6.5 : colCount > 13 ? 7.2 : colCount > 10 ? 8 : 9;
     const usableW = doc.internal.pageSize.getWidth() - 20; // matches margin left/right 10 below
     const studentColW = Math.max(usableW * 0.15, 24);
-    const otherColW = (usableW - studentColW) / (colCount - 1);
+    const admissionColW = isAll ? 0 : Math.max(usableW * 0.09, 14);
+    const remainingCols = isAll ? colCount - 1 : colCount - 2;
+    const otherColW = (usableW - studentColW - admissionColW) / remainingCols;
     columnStyles[0] = { ...columnStyles[0], cellWidth: studentColW };
-    for (let i = 1; i < colCount; i++) columnStyles[i] = { ...columnStyles[i], cellWidth: otherColW };
+    if (!isAll) columnStyles[1] = { ...columnStyles[1], cellWidth: admissionColW };
+    for (let i = isAll ? 1 : 2; i < colCount; i++) columnStyles[i] = { ...columnStyles[i], cellWidth: otherColW };
 
     doc.autoTable({
       startY: 32,
