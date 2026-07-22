@@ -9,10 +9,35 @@
   const STORAGE_KEY = "ubjmv_gradetracker_data_v1";
   const SCHOOL_NAME = "U.B. Jayasooriya Maha Vidyalaya";
   const SCHOOL_NAME_SI = "යූ.බී. ජයසූරිය මහා විද්‍යාලය";
-  const GRADES = ["Grade 6", "Grade 7", "Grade 8", "Grade 9", "Grade 10", "Grade 11"];
+  const GRADES = ["Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6", "Grade 7", "Grade 8", "Grade 9", "Grade 10", "Grade 11"];
   const TERMS = ["Term 1", "Term 2", "Term 3"];
+  const PRIMARY_SUBJECTS = ["මව්බස", "ගණිතය", "පරිසරය", "බුද්ධ ධර්මය", "දෙමළ", "ඉංග්‍රීසි"];
   const JUNIOR_SUBJECTS = ["බුද්ධ ධර්මය", "සිංහල", "ගණිතය", "විද්‍යාව", "ඉංග්‍රීසි", "ඉතිහාසය", "භූගෝලය", "පුරවැසි අධ්‍යනය", "සෞන්දර්ය", "සෞඛ්‍ය", "තො.ස.තා", "ප්‍රා.තා.කු"];
   const SENIOR_SUBJECTS = ["බුද්ධ ධර්මය", "සිංහල", "ගණිතය", "විද්‍යාව", "ඉංග්‍රීසි", "ඉතිහාසය", "I කාණ්ඩ", "II කාණ්ඩය", "III කාණ්ඩය"];
+
+  function defaultSubjectsForGrade(g) {
+    const num = Number(String(g).replace(/\D/g, ""));
+    if (num <= 5) return [...PRIMARY_SUBJECTS];
+    if (num <= 9) return [...JUNIOR_SUBJECTS];
+    return [...SENIOR_SUBJECTS];
+  }
+
+  // If the app later supports more grades than a school's saved/synced data
+  // was created with (e.g. Grade 1-5 added after a school already set up
+  // Grade 6-11), older data objects simply won't have those grade keys. Any
+  // code that then does data.grades[g].subjects for the new grade throws and
+  // silently blanks the whole app. This backfills anything missing, in
+  // place, without touching grades that already exist.
+  function ensureAllGradesExist(target) {
+    let changed = false;
+    GRADES.forEach((g) => {
+      if (!target.grades[g]) {
+        target.grades[g] = { classes: ["A"], subjects: defaultSubjectsForGrade(g) };
+        changed = true;
+      }
+    });
+    return changed;
+  }
 
   const state = {
     view: "dashboard",
@@ -24,10 +49,9 @@
   function buildDefaultData() {
     const grades = {};
     GRADES.forEach((g) => {
-      const isSenior = g === "Grade 10" || g === "Grade 11";
       grades[g] = {
         classes: ["A"],
-        subjects: isSenior ? [...SENIOR_SUBJECTS] : [...JUNIOR_SUBJECTS]
+        subjects: defaultSubjectsForGrade(g)
       };
     });
     return {
@@ -39,6 +63,7 @@
   }
 
   let data = loadData();
+  if (data.__migrated) { delete data.__migrated; saveData(); }
 
   function loadData() {
     try {
@@ -46,6 +71,7 @@
       if (!raw) return buildDefaultData();
       const parsed = JSON.parse(raw);
       if (!parsed.grades || !parsed.students || !parsed.marks) return buildDefaultData();
+      if (ensureAllGradesExist(parsed)) parsed.__migrated = true;
       return parsed;
     } catch (e) {
       console.error("Failed to load data, resetting.", e);
@@ -127,7 +153,9 @@
       syncStatus = "connected";
       syncLastError = "";
       if (doc.exists && doc.data().grades) data.grades = doc.data().grades;
+      const backfilled = ensureAllGradesExist(data);
       saveData(); updateSyncUI(); render();
+      if (backfilled) syncPushConfig();
     }, (err) => { syncStatus = "error"; syncLastError = friendlySyncError(err); updateSyncUI(); console.error(err); });
 
     const unsubStudents = studentsCol().onSnapshot((snap) => {
@@ -347,7 +375,10 @@
 
   function todayStr() {
     const d = new Date();
-    return d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}/${m}/${day}`;
   }
 
   function toast(msg, type) {
@@ -472,7 +503,7 @@
       <div class="grid-stats">
         <div class="stat"><div class="num">${totalStudents}</div><div class="label">Students</div></div>
         <div class="stat"><div class="num">${totalClasses}</div><div class="label">Classes</div></div>
-        <div class="stat"><div class="num">${gradesWithStudents}/6</div><div class="label">Grades in use</div></div>
+        <div class="stat"><div class="num">${gradesWithStudents}/${GRADES.length}</div><div class="label">Grades in use</div></div>
         <div class="stat"><div class="num">3</div><div class="label">Terms tracked</div></div>
       </div>
 
@@ -603,9 +634,8 @@
     document.querySelectorAll("[data-reset-subjects]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const g = btn.dataset.resetSubjects;
-        const isSenior = g === "Grade 10" || g === "Grade 11";
         confirmModal(`Reset ${g} subjects to the default list? Custom subjects you added will be removed.`, () => {
-          data.grades[g].subjects = isSenior ? [...SENIOR_SUBJECTS] : [...JUNIOR_SUBJECTS];
+          data.grades[g].subjects = defaultSubjectsForGrade(g);
           saveData(); syncPushConfig(g); render(); toast("Subjects reset to default.");
         }, "Reset");
       });
@@ -1166,6 +1196,10 @@
     return `${n} වන වාරය`;
   }
 
+  function gradeClassLabelSi(gradeNum, cls) {
+    return `${SI.grade} ${gradeNum}- ${cls}`;
+  }
+
   function getPdfLib() {
     if (!window.jspdf || !window.jspdf.jsPDF) {
       toast("PDF tools haven't finished loading yet — please check your connection and try again in a moment.", "error");
@@ -1200,7 +1234,7 @@
     rows.push([`${SI.studentProgressReport} \u00b7 ${SI.generated} ${todayStr()}`]);
     rows.push([]);
     rows.push([SI.student, st.name, SI.admissionNo, st.admissionNo || ""]);
-    rows.push([SI.grade, st.grade.replace(/\D/g, ""), SI.classLabel, st.cls]);
+    rows.push([gradeClassLabelSi(st.grade.replace(/\D/g, ""), st.cls)]);
     rows.push([]);
     rows.push([SI.subject, ...TERMS.map(termLabelSi), SI.average, SI.letterGrade]);
 
@@ -1247,7 +1281,7 @@
 
     const rows = [];
     rows.push([SCHOOL_NAME_SI]);
-    rows.push([`${isAll ? SI.classSummaryAllTerms : `${SI.classMarksheet} \u00b7 ${termLabelSi(term)}`} \u00b7 ${SI.grade} ${gradeNum} / ${SI.classLabel} ${cls} \u00b7 ${SI.generated} ${todayStr()}`]);
+    rows.push([`${isAll ? SI.classSummaryAllTerms : `${SI.classMarksheet} \u00b7 ${termLabelSi(term)}`} \u00b7 ${gradeClassLabelSi(gradeNum, cls)} \u00b7 ${SI.generated} ${todayStr()}`]);
     rows.push([]);
 
     const wb = XLSX.utils.book_new();
@@ -1477,7 +1511,7 @@
 
     drawText(doc, st.name, 14, 34, { ptSize: 11, weight: "700", color: PDF_INK });
     drawText(doc, `${SI.admissionNo}: ${st.admissionNo || "—"}`, 14, 40, { ptSize: 9.5, weight: "400", color: PDF_INK });
-    drawText(doc, `${SI.grade} ${st.grade.replace(/\D/g, "")}  \u00b7  ${SI.classLabel} ${st.cls}`, 110, 40, { ptSize: 9.5, weight: "400", color: PDF_INK });
+    drawText(doc, gradeClassLabelSi(st.grade.replace(/\D/g, ""), st.cls), 110, 40, { ptSize: 9.5, weight: "400", color: PDF_INK });
 
     const usableW = doc.internal.pageSize.getWidth() - 28; // matches the 14mm left/right margin used throughout
     const subjColW = usableW * 0.34;
@@ -1530,7 +1564,7 @@
     const doc = new jsPDFCtor({ orientation: "landscape", unit: "mm", format: "a4" });
     const isAll = term === "ALL";
     const gradeNum = grade.replace(/\D/g, "");
-    pdfHeader(doc, `${isAll ? SI.classSummaryAllTerms : `${SI.classMarksheet} \u00b7 ${termLabelSi(term)}`} \u00b7 ${SI.grade} ${gradeNum} / ${SI.classLabel} ${cls} \u00b7 ${SI.generated} ${todayStr()}`);
+    pdfHeader(doc, `${isAll ? SI.classSummaryAllTerms : `${SI.classMarksheet} \u00b7 ${termLabelSi(term)}`} \u00b7 ${gradeClassLabelSi(gradeNum, cls)} \u00b7 ${SI.generated} ${todayStr()}`);
 
     let head, body, columnStyles;
     if (isAll) {

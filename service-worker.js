@@ -1,4 +1,4 @@
-const CACHE_NAME = "ubjmv-grade-tracker-v5";
+const CACHE_NAME = "ubjmv-grade-tracker-v7";
 const ASSETS = [
   "./",
   "./index.html",
