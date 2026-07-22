@@ -426,6 +426,47 @@
     return overlay;
   }
 
+  function generateConfirmCode() {
+    const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // avoids O/0, I/1/l look-alikes
+    let out = "";
+    for (let i = 0; i < 6; i++) out += chars[Math.floor(Math.random() * chars.length)];
+    return out;
+  }
+
+  function confirmWithCode(message, onConfirm, confirmLabel) {
+    const code = generateConfirmCode();
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.innerHTML = `<div class="modal">
+      <h3>Please confirm</h3>
+      <p style="margin:0 0 14px;color:var(--ink-soft);">${escapeHtml(message)}</p>
+      <p class="hint" style="margin-bottom:6px;">Type this code to confirm:</p>
+      <div style="font-family:monospace;font-size:1.4rem;font-weight:700;letter-spacing:.18em;background:var(--surface-alt);border-radius:8px;padding:10px 14px;text-align:center;margin-bottom:14px;color:var(--primary-dark);">${code}</div>
+      <div class="field"><input type="text" id="confirm-code-input" placeholder="Type the code above" autocomplete="off"></div>
+      <div id="confirm-code-error" style="color:var(--danger);font-size:0.82rem;min-height:18px;"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="confirm-code-cancel">Cancel</button>
+        <button class="btn btn-danger" id="confirm-code-ok">${escapeHtml(confirmLabel || "Confirm")}</button>
+      </div>
+    </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+    const input = document.getElementById("confirm-code-input");
+    const tryConfirm = () => {
+      const val = input.value.trim().toUpperCase();
+      if (val === code) {
+        overlay.remove();
+        onConfirm();
+      } else {
+        document.getElementById("confirm-code-error").textContent = "That code doesn't match — type it exactly as shown above.";
+      }
+    };
+    document.getElementById("confirm-code-cancel").addEventListener("click", () => overlay.remove());
+    document.getElementById("confirm-code-ok").addEventListener("click", tryConfirm);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") tryConfirm(); });
+    input.focus();
+  }
+
   function confirmModal(message, onConfirm, confirmLabel) {
     showModal({
       title: "Please confirm",
@@ -444,6 +485,7 @@
     students: ["Roster", "Students"],
     marks: ["Recording", "Marks Entry"],
     reports: ["Downloads", "Reports"],
+    analysis: ["Insights", "Analysis"],
     data: ["Safety", "Data & Sync"]
   };
 
@@ -477,6 +519,7 @@
       case "students": root.innerHTML = renderStudents(); attachStudentsEvents(); break;
       case "marks": root.innerHTML = renderMarks(); attachMarksEvents(); break;
       case "reports": root.innerHTML = renderReports(); attachReportsEvents(); break;
+      case "analysis": root.innerHTML = renderAnalysis(); attachAnalysisEvents(); break;
       case "data": root.innerHTML = renderData(); attachDataEvents(); break;
     }
     if (state.view === "dashboard") attachDashboardEvents();
@@ -1180,7 +1223,7 @@
     student: "ශිෂ්‍යයා",
     subject: "විෂය",
     grade: "පංතිය",
-    admissionNo: "ලියාපදිංචි අංකය",
+    admissionNo: "ඇතුලත්වීමේ අංකය",
     classLabel: "අංශය",
     total: "එකතුව",
     totalThreeTerms: "එකතුව (වාර 3)",
@@ -1625,6 +1668,115 @@
   }
 
   /* ========================================================
+     ANALYSIS
+     ======================================================== */
+  function computeMarkHistogram(grade, cls, term, subject) {
+    const students = getStudentsFor(grade, cls);
+    const bins = new Array(10).fill(0);
+    const marked = [];
+    students.forEach((st) => {
+      const v = studentMarks(st.id, term)[subject];
+      if (v !== undefined && v !== null && v !== "") {
+        const n = Number(v);
+        marked.push(n);
+        let idx = Math.floor(n / 10);
+        if (idx > 9) idx = 9;
+        if (idx < 0) idx = 0;
+        bins[idx]++;
+      }
+    });
+    return { bins, marked, totalStudents: students.length };
+  }
+
+  function buildHistogramSvg(counts, labels) {
+    const w = 760, h = 320;
+    const padL = 14, padR = 14, padT = 30, padB = 54;
+    const chartW = w - padL - padR;
+    const chartH = h - padT - padB;
+    const n = counts.length;
+    const gap = 10;
+    const barW = (chartW - gap * (n - 1)) / n;
+    const maxCount = Math.max(1, ...counts);
+    let bars = "";
+    counts.forEach((c, i) => {
+      const barH = (c / maxCount) * chartH;
+      const x = padL + i * (barW + gap);
+      const y = padT + (chartH - barH);
+      bars += `
+        <rect x="${x.toFixed(1)}" y="${(c > 0 ? y : padT + chartH - 2).toFixed(1)}" width="${barW.toFixed(1)}" height="${(c > 0 ? barH : 2).toFixed(1)}" rx="4" fill="var(--primary)" opacity="${c > 0 ? 1 : 0.25}" />
+        ${c > 0 ? `<text x="${(x + barW / 2).toFixed(1)}" y="${(y - 7).toFixed(1)}" text-anchor="middle" font-size="13" font-weight="700" fill="var(--primary-dark)" font-family="Work Sans, sans-serif">${c}</text>` : ""}
+        <text x="${(x + barW / 2).toFixed(1)}" y="${(padT + chartH + 20).toFixed(1)}" text-anchor="middle" font-size="11" fill="var(--muted)" font-family="Work Sans, sans-serif">${escapeHtml(labels[i])}</text>
+      `;
+    });
+    return `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;display:block;">
+      <line x1="${padL}" y1="${padT + chartH}" x2="${padL + chartW}" y2="${padT + chartH}" stroke="var(--border)" stroke-width="1.5" />
+      ${bars}
+    </svg>`;
+  }
+
+  function renderAnalysis() {
+    const sel = state.selections.analysis || (state.selections.analysis = { grade: GRADES[0], cls: "", term: TERMS[0], subject: "" });
+    if (!sel.cls || !data.grades[sel.grade].classes.includes(sel.cls)) sel.cls = data.grades[sel.grade].classes[0] || "";
+    const subjects = data.grades[sel.grade].subjects;
+    if (!sel.subject || !subjects.includes(sel.subject)) sel.subject = subjects[0] || "";
+
+    const gradeSelector = `<div class="field"><label>Grade</label><select id="an-grade">${GRADES.map((g) => `<option ${g === sel.grade ? "selected" : ""}>${g}</option>`).join("")}</select></div>`;
+
+    if (!sel.cls) {
+      return `<div class="card"><h2>Mark distribution</h2><div class="inline-form">${gradeSelector}</div>
+        <div class="empty-state"><p>No classes set up for ${escapeHtml(sel.grade)} yet. Add one under Setup first.</p></div></div>`;
+    }
+    if (!subjects.length) {
+      return `<div class="card"><h2>Mark distribution</h2><div class="inline-form">${gradeSelector}</div>
+        <div class="empty-state"><p>No subjects configured for ${escapeHtml(sel.grade)}. Add subjects under Setup first.</p></div></div>`;
+    }
+
+    const { bins, marked, totalStudents } = computeMarkHistogram(sel.grade, sel.cls, sel.term, sel.subject);
+    const labels = ["0-10", "10-20", "20-30", "30-40", "40-50", "50-60", "60-70", "70-80", "80-90", "90-100"];
+    const avg = marked.length ? round1(marked.reduce((a, b) => a + b, 0) / marked.length) : null;
+    const highest = marked.length ? Math.max(...marked) : null;
+    const lowest = marked.length ? Math.min(...marked) : null;
+
+    return `
+      <div class="card">
+        <h2>Mark distribution</h2>
+        <p class="hint">How marks for one subject spread across a class, in bands of 10.</p>
+        <div class="report-toolbar">
+          ${gradeSelector}
+          <div class="field"><label>Class</label><select id="an-class">${data.grades[sel.grade].classes.map((c) => `<option ${c === sel.cls ? "selected" : ""}>${escapeHtml(c)}</option>`).join("")}</select></div>
+          <div class="field"><label>Term</label><select id="an-term">${TERMS.map((t) => `<option ${t === sel.term ? "selected" : ""}>${t}</option>`).join("")}</select></div>
+          <div class="field"><label>Subject</label><select id="an-subject">${subjects.map((s) => `<option ${s === sel.subject ? "selected" : ""}>${escapeHtml(s)}</option>`).join("")}</select></div>
+        </div>
+        ${marked.length ? `
+          <div class="grid-stats" style="margin-bottom:18px;">
+            <div class="stat"><div class="num">${marked.length}/${totalStudents}</div><div class="label">Students marked</div></div>
+            <div class="stat"><div class="num">${avg}%</div><div class="label">Average</div></div>
+            <div class="stat"><div class="num">${highest}</div><div class="label">Highest</div></div>
+            <div class="stat"><div class="num">${lowest}</div><div class="label">Lowest</div></div>
+          </div>
+          <div>${buildHistogramSvg(bins, labels)}</div>
+        ` : `<div class="empty-state"><p>No marks recorded yet for ${escapeHtml(sel.subject)} in ${escapeHtml(sel.term)}.</p></div>`}
+      </div>
+    `;
+  }
+
+  function attachAnalysisEvents() {
+    const sel = state.selections.analysis;
+    document.getElementById("an-grade").addEventListener("change", (e) => {
+      sel.grade = e.target.value;
+      sel.cls = data.grades[sel.grade].classes[0] || "";
+      sel.subject = "";
+      render();
+    });
+    const clsSel = document.getElementById("an-class");
+    if (clsSel) clsSel.addEventListener("change", (e) => { sel.cls = e.target.value; render(); });
+    const termSel = document.getElementById("an-term");
+    if (termSel) termSel.addEventListener("change", (e) => { sel.term = e.target.value; render(); });
+    const subjSel = document.getElementById("an-subject");
+    if (subjSel) subjSel.addEventListener("change", (e) => { sel.subject = e.target.value; render(); });
+  }
+
+  /* ========================================================
      DATA / BACKUP / LIVE SYNC
      ======================================================== */
   function renderData() {
@@ -1745,7 +1897,7 @@
     });
 
     document.getElementById("reset-btn").addEventListener("click", () => {
-      confirmModal(
+      confirmWithCode(
         isSyncActive()
           ? "Erase every grade, class, student and mark — for every teacher sharing this sync code? This cannot be undone."
           : "Erase every grade, class, student and mark stored on this device? This cannot be undone.",
