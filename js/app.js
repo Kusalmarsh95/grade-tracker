@@ -90,6 +90,12 @@
     }
   }
 
+  async function sha256Hex(text) {
+    const enc = new TextEncoder().encode(text);
+    const buf = await crypto.subtle.digest("SHA-256", enc);
+    return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
   function uid(prefix) {
     return (prefix || "id") + "_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   }
@@ -153,6 +159,7 @@
       syncStatus = "connected";
       syncLastError = "";
       if (doc.exists && doc.data().grades) data.grades = doc.data().grades;
+      if (doc.exists && "erasePasswordHash" in doc.data()) data.meta.erasePasswordHash = doc.data().erasePasswordHash;
       const backfilled = ensureAllGradesExist(data);
       saveData(); updateSyncUI(); render();
       if (backfilled) syncPushConfig();
@@ -176,7 +183,7 @@
   async function syncFullReplace() {
     if (!isSyncActive()) return;
     const batch = db.batch();
-    batch.set(configDocRef(), { grades: data.grades });
+    batch.set(configDocRef(), { grades: data.grades, erasePasswordHash: data.meta.erasePasswordHash || null });
     const [existingStudents, existingMarks] = await Promise.all([studentsCol().get(), marksCol().get()]);
     const keepIds = new Set(data.students.map((s) => s.id));
     existingStudents.docs.forEach((d) => { if (!keepIds.has(d.id)) batch.delete(d.ref); });
@@ -241,6 +248,12 @@
       badge.innerHTML = `<span class="dot"></span> ${labels[syncStatus]}`;
     });
     if (state.view === "data") render();
+  }
+
+  function syncPushErasePasswordHash() {
+    if (!isSyncActive()) return;
+    const ref = configDocRef();
+    ref.set({ erasePasswordHash: data.meta.erasePasswordHash || null }, { merge: true }).catch((e) => console.error(e));
   }
 
   function syncPushConfig(grade) {
@@ -1781,8 +1794,22 @@
      ======================================================== */
   function renderData() {
     const syncCard = renderSyncCard();
+    const hasPassword = !!(data.meta && data.meta.erasePasswordHash);
     return `
       ${syncCard}
+      <div class="card">
+        <h2>Admin password</h2>
+        <p class="hint">A code shown on screen only stops accidental taps — anyone can read and retype it. A password only you know actually restricts who can erase data${isSyncActive() ? ", for every teacher sharing this sync code" : ""}.</p>
+        ${hasPassword
+          ? `<div class="sync-badge sync-connected" style="margin-bottom:14px;"><span class="dot"></span> Password protection is on</div>
+             <div style="display:flex;gap:10px;flex-wrap:wrap;">
+               <button class="btn btn-ghost btn-sm" id="change-password-btn">Change password</button>
+               <button class="btn btn-danger btn-sm" id="remove-password-btn">Remove password</button>
+             </div>`
+          : `<div class="field" style="max-width:280px;"><label>Set an admin password</label><input type="password" id="new-password-input" placeholder="At least 4 characters"></div>
+             <button class="btn btn-primary btn-sm" id="set-password-btn">Set password</button>`
+        }
+      </div>
       <div class="card">
         <h2>Export a backup</h2>
         <p class="hint">Saves every grade, class, subject, student and mark into one file you can keep safe or move to another computer.</p>
@@ -1795,7 +1822,7 @@
       </div>
       <div class="card">
         <h2>Start over</h2>
-        <p class="hint">Permanently erase all classes, students and marks${isSyncActive() ? " for everyone sharing this sync code" : " stored on this device"}.</p>
+        <p class="hint">Permanently erase all classes, students and marks${isSyncActive() ? " for everyone sharing this sync code" : " stored on this device"}.${hasPassword ? "" : " Set an admin password above to restrict who can do this."}</p>
         <button class="btn btn-danger" id="reset-btn">Erase all data</button>
       </div>
     `;
@@ -1855,6 +1882,78 @@
       navigator.clipboard && navigator.clipboard.writeText(syncCode).then(() => toast("Code copied.")).catch(() => toast("Couldn't copy — select and copy manually."));
     });
 
+    const setPwBtn = document.getElementById("set-password-btn");
+    if (setPwBtn) setPwBtn.addEventListener("click", async () => {
+      const val = document.getElementById("new-password-input").value;
+      if (val.length < 4) return toast("Use at least 4 characters.", "error");
+      data.meta.erasePasswordHash = await sha256Hex(val);
+      saveData(); syncPushErasePasswordHash(); render();
+      toast("Admin password set. Keep it somewhere safe — it can't be recovered if forgotten.");
+    });
+
+    const changePwBtn = document.getElementById("change-password-btn");
+    if (changePwBtn) changePwBtn.addEventListener("click", () => {
+      showModal({
+        title: "Change admin password",
+        bodyHtml: `
+          <div class="field"><label>Current password</label><input type="password" id="cp-current" autofocus></div>
+          <div class="field"><label>New password</label><input type="password" id="cp-new" placeholder="At least 4 characters"></div>
+          <div id="cp-error" style="color:var(--danger);font-size:0.82rem;min-height:18px;"></div>
+        `,
+        actions: [
+          { label: "Cancel", className: "btn-ghost" },
+          {
+            label: "Save new password", className: "btn-primary", close: false, onClick: async (overlay) => {
+              const current = document.getElementById("cp-current").value;
+              const next = document.getElementById("cp-new").value;
+              const currentHash = await sha256Hex(current);
+              if (currentHash !== data.meta.erasePasswordHash) {
+                document.getElementById("cp-error").textContent = "Current password is incorrect.";
+                return;
+              }
+              if (next.length < 4) {
+                document.getElementById("cp-error").textContent = "New password must be at least 4 characters.";
+                return;
+              }
+              data.meta.erasePasswordHash = await sha256Hex(next);
+              saveData(); syncPushErasePasswordHash(); render();
+              toast("Password changed.");
+              overlay.remove();
+            }
+          }
+        ]
+      });
+    });
+
+    const removePwBtn = document.getElementById("remove-password-btn");
+    if (removePwBtn) removePwBtn.addEventListener("click", () => {
+      showModal({
+        title: "Remove admin password",
+        bodyHtml: `
+          <p class="hint">Without a password, anyone with access to this app can erase all data (after typing a one-time confirmation code shown on screen).</p>
+          <div class="field"><label>Current password</label><input type="password" id="rp-current" autofocus></div>
+          <div id="rp-error" style="color:var(--danger);font-size:0.82rem;min-height:18px;"></div>
+        `,
+        actions: [
+          { label: "Cancel", className: "btn-ghost" },
+          {
+            label: "Remove password", className: "btn-danger", close: false, onClick: async (overlay) => {
+              const current = document.getElementById("rp-current").value;
+              const currentHash = await sha256Hex(current);
+              if (currentHash !== data.meta.erasePasswordHash) {
+                document.getElementById("rp-error").textContent = "Current password is incorrect.";
+                return;
+              }
+              delete data.meta.erasePasswordHash;
+              saveData(); syncPushErasePasswordHash(); render();
+              toast("Password protection removed.");
+              overlay.remove();
+            }
+          }
+        ]
+      });
+    });
+
     document.getElementById("export-btn").addEventListener("click", () => {
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
@@ -1897,17 +1996,44 @@
     });
 
     document.getElementById("reset-btn").addEventListener("click", () => {
-      confirmWithCode(
-        isSyncActive()
-          ? "Erase every grade, class, student and mark — for every teacher sharing this sync code? This cannot be undone."
-          : "Erase every grade, class, student and mark stored on this device? This cannot be undone.",
-        async () => {
-          data = buildDefaultData();
-          saveData(); render(); toast("All data erased.");
-          if (isSyncActive()) await syncFullReplace();
-        },
-        "Erase everything"
-      );
+      const message = isSyncActive()
+        ? "Erase every grade, class, student and mark — for every teacher sharing this sync code? This cannot be undone."
+        : "Erase every grade, class, student and mark stored on this device? This cannot be undone.";
+      const doErase = async () => {
+        const keepHash = data.meta && data.meta.erasePasswordHash;
+        data = buildDefaultData();
+        if (keepHash) data.meta.erasePasswordHash = keepHash;
+        saveData(); render(); toast("All data erased.");
+        if (isSyncActive()) await syncFullReplace();
+      };
+
+      if (data.meta && data.meta.erasePasswordHash) {
+        showModal({
+          title: "Admin password required",
+          bodyHtml: `
+            <p style="margin:0 0 14px;color:var(--ink-soft);">${escapeHtml(message)}</p>
+            <div class="field"><label>Admin password</label><input type="password" id="erase-pw-input" autofocus></div>
+            <div id="erase-pw-error" style="color:var(--danger);font-size:0.82rem;min-height:18px;"></div>
+          `,
+          actions: [
+            { label: "Cancel", className: "btn-ghost" },
+            {
+              label: "Erase everything", className: "btn-danger", close: false, onClick: async (overlay) => {
+                const val = document.getElementById("erase-pw-input").value;
+                const hash = await sha256Hex(val);
+                if (hash !== data.meta.erasePasswordHash) {
+                  document.getElementById("erase-pw-error").textContent = "Incorrect password.";
+                  return;
+                }
+                overlay.remove();
+                doErase();
+              }
+            }
+          ]
+        });
+      } else {
+        confirmWithCode(message + " Tip: set an admin password above so only you can do this next time.", doErase, "Erase everything");
+      }
     });
   }
 
