@@ -8,6 +8,9 @@
   /* ---------- Constants ---------- */
   const STORAGE_KEY = "ubjmv_gradetracker_data_v1";
   const SCHOOL_NAME = "U.B. Jayasooriya Maha Vidyalaya";
+  // SHA-256 hash of the fixed admin password — the password itself is never
+  // stored or shown anywhere in the app, only this one-way hash of it.
+  const ERASE_PASSWORD_HASH = "d9ab09bb9fb42893e31818eab0590b906045f4d335b8552afbde14f2c5e276cc";
   const SCHOOL_NAME_SI = "යූ.බී. ජයසූරිය මහා විද්‍යාලය";
   const GRADES = ["Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6", "Grade 7", "Grade 8", "Grade 9", "Grade 10", "Grade 11"];
   const TERMS = ["Term 1", "Term 2", "Term 3"];
@@ -159,7 +162,6 @@
       syncStatus = "connected";
       syncLastError = "";
       if (doc.exists && doc.data().grades) data.grades = doc.data().grades;
-      if (doc.exists && "erasePasswordHash" in doc.data()) data.meta.erasePasswordHash = doc.data().erasePasswordHash;
       const backfilled = ensureAllGradesExist(data);
       saveData(); updateSyncUI(); render();
       if (backfilled) syncPushConfig();
@@ -183,7 +185,7 @@
   async function syncFullReplace() {
     if (!isSyncActive()) return;
     const batch = db.batch();
-    batch.set(configDocRef(), { grades: data.grades, erasePasswordHash: data.meta.erasePasswordHash || null });
+    batch.set(configDocRef(), { grades: data.grades });
     const [existingStudents, existingMarks] = await Promise.all([studentsCol().get(), marksCol().get()]);
     const keepIds = new Set(data.students.map((s) => s.id));
     existingStudents.docs.forEach((d) => { if (!keepIds.has(d.id)) batch.delete(d.ref); });
@@ -248,12 +250,6 @@
       badge.innerHTML = `<span class="dot"></span> ${labels[syncStatus]}`;
     });
     if (state.view === "data") render();
-  }
-
-  function syncPushErasePasswordHash() {
-    if (!isSyncActive()) return;
-    const ref = configDocRef();
-    ref.set({ erasePasswordHash: data.meta.erasePasswordHash || null }, { merge: true }).catch((e) => console.error(e));
   }
 
   function syncPushConfig(grade) {
@@ -437,47 +433,6 @@
     overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
     document.body.appendChild(overlay);
     return overlay;
-  }
-
-  function generateConfirmCode() {
-    const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // avoids O/0, I/1/l look-alikes
-    let out = "";
-    for (let i = 0; i < 6; i++) out += chars[Math.floor(Math.random() * chars.length)];
-    return out;
-  }
-
-  function confirmWithCode(message, onConfirm, confirmLabel) {
-    const code = generateConfirmCode();
-    const overlay = document.createElement("div");
-    overlay.className = "modal-overlay";
-    overlay.innerHTML = `<div class="modal">
-      <h3>Please confirm</h3>
-      <p style="margin:0 0 14px;color:var(--ink-soft);">${escapeHtml(message)}</p>
-      <p class="hint" style="margin-bottom:6px;">Type this code to confirm:</p>
-      <div style="font-family:monospace;font-size:1.4rem;font-weight:700;letter-spacing:.18em;background:var(--surface-alt);border-radius:8px;padding:10px 14px;text-align:center;margin-bottom:14px;color:var(--primary-dark);">${code}</div>
-      <div class="field"><input type="text" id="confirm-code-input" placeholder="Type the code above" autocomplete="off"></div>
-      <div id="confirm-code-error" style="color:var(--danger);font-size:0.82rem;min-height:18px;"></div>
-      <div class="modal-actions">
-        <button class="btn btn-ghost" id="confirm-code-cancel">Cancel</button>
-        <button class="btn btn-danger" id="confirm-code-ok">${escapeHtml(confirmLabel || "Confirm")}</button>
-      </div>
-    </div>`;
-    document.body.appendChild(overlay);
-    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
-    const input = document.getElementById("confirm-code-input");
-    const tryConfirm = () => {
-      const val = input.value.trim().toUpperCase();
-      if (val === code) {
-        overlay.remove();
-        onConfirm();
-      } else {
-        document.getElementById("confirm-code-error").textContent = "That code doesn't match — type it exactly as shown above.";
-      }
-    };
-    document.getElementById("confirm-code-cancel").addEventListener("click", () => overlay.remove());
-    document.getElementById("confirm-code-ok").addEventListener("click", tryConfirm);
-    input.addEventListener("keydown", (e) => { if (e.key === "Enter") tryConfirm(); });
-    input.focus();
   }
 
   function confirmModal(message, onConfirm, confirmLabel) {
@@ -1794,22 +1749,8 @@
      ======================================================== */
   function renderData() {
     const syncCard = renderSyncCard();
-    const hasPassword = !!(data.meta && data.meta.erasePasswordHash);
     return `
       ${syncCard}
-      <div class="card">
-        <h2>Admin password</h2>
-        <p class="hint">A code shown on screen only stops accidental taps — anyone can read and retype it. A password only you know actually restricts who can erase data${isSyncActive() ? ", for every teacher sharing this sync code" : ""}.</p>
-        ${hasPassword
-          ? `<div class="sync-badge sync-connected" style="margin-bottom:14px;"><span class="dot"></span> Password protection is on</div>
-             <div style="display:flex;gap:10px;flex-wrap:wrap;">
-               <button class="btn btn-ghost btn-sm" id="change-password-btn">Change password</button>
-               <button class="btn btn-danger btn-sm" id="remove-password-btn">Remove password</button>
-             </div>`
-          : `<div class="field" style="max-width:280px;"><label>Set an admin password</label><input type="password" id="new-password-input" placeholder="At least 4 characters"></div>
-             <button class="btn btn-primary btn-sm" id="set-password-btn">Set password</button>`
-        }
-      </div>
       <div class="card">
         <h2>Export a backup</h2>
         <p class="hint">Saves every grade, class, subject, student and mark into one file you can keep safe or move to another computer.</p>
@@ -1822,7 +1763,7 @@
       </div>
       <div class="card">
         <h2>Start over</h2>
-        <p class="hint">Permanently erase all classes, students and marks${isSyncActive() ? " for everyone sharing this sync code" : " stored on this device"}.${hasPassword ? "" : " Set an admin password above to restrict who can do this."}</p>
+        <p class="hint">Permanently erase all classes, students and marks${isSyncActive() ? " for everyone sharing this sync code" : " stored on this device"}. Restricted to whoever holds the admin password.</p>
         <button class="btn btn-danger" id="reset-btn">Erase all data</button>
       </div>
     `;
@@ -1882,78 +1823,6 @@
       navigator.clipboard && navigator.clipboard.writeText(syncCode).then(() => toast("Code copied.")).catch(() => toast("Couldn't copy — select and copy manually."));
     });
 
-    const setPwBtn = document.getElementById("set-password-btn");
-    if (setPwBtn) setPwBtn.addEventListener("click", async () => {
-      const val = document.getElementById("new-password-input").value;
-      if (val.length < 4) return toast("Use at least 4 characters.", "error");
-      data.meta.erasePasswordHash = await sha256Hex(val);
-      saveData(); syncPushErasePasswordHash(); render();
-      toast("Admin password set. Keep it somewhere safe — it can't be recovered if forgotten.");
-    });
-
-    const changePwBtn = document.getElementById("change-password-btn");
-    if (changePwBtn) changePwBtn.addEventListener("click", () => {
-      showModal({
-        title: "Change admin password",
-        bodyHtml: `
-          <div class="field"><label>Current password</label><input type="password" id="cp-current" autofocus></div>
-          <div class="field"><label>New password</label><input type="password" id="cp-new" placeholder="At least 4 characters"></div>
-          <div id="cp-error" style="color:var(--danger);font-size:0.82rem;min-height:18px;"></div>
-        `,
-        actions: [
-          { label: "Cancel", className: "btn-ghost" },
-          {
-            label: "Save new password", className: "btn-primary", close: false, onClick: async (overlay) => {
-              const current = document.getElementById("cp-current").value;
-              const next = document.getElementById("cp-new").value;
-              const currentHash = await sha256Hex(current);
-              if (currentHash !== data.meta.erasePasswordHash) {
-                document.getElementById("cp-error").textContent = "Current password is incorrect.";
-                return;
-              }
-              if (next.length < 4) {
-                document.getElementById("cp-error").textContent = "New password must be at least 4 characters.";
-                return;
-              }
-              data.meta.erasePasswordHash = await sha256Hex(next);
-              saveData(); syncPushErasePasswordHash(); render();
-              toast("Password changed.");
-              overlay.remove();
-            }
-          }
-        ]
-      });
-    });
-
-    const removePwBtn = document.getElementById("remove-password-btn");
-    if (removePwBtn) removePwBtn.addEventListener("click", () => {
-      showModal({
-        title: "Remove admin password",
-        bodyHtml: `
-          <p class="hint">Without a password, anyone with access to this app can erase all data (after typing a one-time confirmation code shown on screen).</p>
-          <div class="field"><label>Current password</label><input type="password" id="rp-current" autofocus></div>
-          <div id="rp-error" style="color:var(--danger);font-size:0.82rem;min-height:18px;"></div>
-        `,
-        actions: [
-          { label: "Cancel", className: "btn-ghost" },
-          {
-            label: "Remove password", className: "btn-danger", close: false, onClick: async (overlay) => {
-              const current = document.getElementById("rp-current").value;
-              const currentHash = await sha256Hex(current);
-              if (currentHash !== data.meta.erasePasswordHash) {
-                document.getElementById("rp-error").textContent = "Current password is incorrect.";
-                return;
-              }
-              delete data.meta.erasePasswordHash;
-              saveData(); syncPushErasePasswordHash(); render();
-              toast("Password protection removed.");
-              overlay.remove();
-            }
-          }
-        ]
-      });
-    });
-
     document.getElementById("export-btn").addEventListener("click", () => {
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
@@ -2000,40 +1869,34 @@
         ? "Erase every grade, class, student and mark — for every teacher sharing this sync code? This cannot be undone."
         : "Erase every grade, class, student and mark stored on this device? This cannot be undone.";
       const doErase = async () => {
-        const keepHash = data.meta && data.meta.erasePasswordHash;
         data = buildDefaultData();
-        if (keepHash) data.meta.erasePasswordHash = keepHash;
         saveData(); render(); toast("All data erased.");
         if (isSyncActive()) await syncFullReplace();
       };
 
-      if (data.meta && data.meta.erasePasswordHash) {
-        showModal({
-          title: "Admin password required",
-          bodyHtml: `
-            <p style="margin:0 0 14px;color:var(--ink-soft);">${escapeHtml(message)}</p>
-            <div class="field"><label>Admin password</label><input type="password" id="erase-pw-input" autofocus></div>
-            <div id="erase-pw-error" style="color:var(--danger);font-size:0.82rem;min-height:18px;"></div>
-          `,
-          actions: [
-            { label: "Cancel", className: "btn-ghost" },
-            {
-              label: "Erase everything", className: "btn-danger", close: false, onClick: async (overlay) => {
-                const val = document.getElementById("erase-pw-input").value;
-                const hash = await sha256Hex(val);
-                if (hash !== data.meta.erasePasswordHash) {
-                  document.getElementById("erase-pw-error").textContent = "Incorrect password.";
-                  return;
-                }
-                overlay.remove();
-                doErase();
+      showModal({
+        title: "Admin password required",
+        bodyHtml: `
+          <p style="margin:0 0 14px;color:var(--ink-soft);">${escapeHtml(message)}</p>
+          <div class="field"><label>Admin password</label><input type="password" id="erase-pw-input" autofocus></div>
+          <div id="erase-pw-error" style="color:var(--danger);font-size:0.82rem;min-height:18px;"></div>
+        `,
+        actions: [
+          { label: "Cancel", className: "btn-ghost" },
+          {
+            label: "Erase everything", className: "btn-danger", close: false, onClick: async (overlay) => {
+              const val = document.getElementById("erase-pw-input").value;
+              const hash = await sha256Hex(val);
+              if (hash !== ERASE_PASSWORD_HASH) {
+                document.getElementById("erase-pw-error").textContent = "Incorrect password.";
+                return;
               }
+              overlay.remove();
+              doErase();
             }
-          ]
-        });
-      } else {
-        confirmWithCode(message + " Tip: set an admin password above so only you can do this next time.", doErase, "Erase everything");
-      }
+          }
+        ]
+      });
     });
   }
 
