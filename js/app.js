@@ -290,6 +290,21 @@
   }
 
   /* ---------- Calculation helpers ---------- */
+  const ABSENT = "AB";
+
+  function isAbsentMark(v) {
+    return typeof v === "string" && v.trim().toUpperCase() === ABSENT;
+  }
+
+  // Parses what a teacher typed into a mark cell: a valid "ab"/"AB" entry
+  // (any case) becomes the ABSENT sentinel, a number gets clamped to 0-100,
+  // anything else (including empty) is treated as "not entered".
+  function parseMarkInput(raw) {
+    if (raw === "" || raw === null || raw === undefined) return null;
+    if (isAbsentMark(raw)) return ABSENT;
+    return clampMark(raw);
+  }
+
   function clampMark(v) {
     if (v === "" || v === null || v === undefined) return null;
     let n = Number(v);
@@ -323,16 +338,18 @@
   function computeStudentTermStats(studentId, grade, term) {
     const subjects = data.grades[grade].subjects;
     const marksObj = studentMarks(studentId, term);
-    let total = 0, entered = 0;
+    let total = 0, entered = 0, absentCount = 0;
     subjects.forEach((s) => {
       const v = marksObj[s];
-      if (v !== undefined && v !== null && v !== "") {
+      if (isAbsentMark(v)) {
+        absentCount++;
+      } else if (v !== undefined && v !== null && v !== "") {
         total += Number(v);
         entered++;
       }
     });
     const average = subjects.length > 0 ? total / subjects.length : 0;
-    return { total, average, subjectsCount: subjects.length, entered };
+    return { total, average, subjectsCount: subjects.length, entered, absentCount };
   }
 
   function computeStudentOverallStats(studentId, grade) {
@@ -864,11 +881,13 @@
       const cells = isWide
         ? subjects.map((subj) => {
             const v = marksObj[subj];
-            return `<td><input type="number" min="0" max="100" class="mark-input" data-student="${st.id}" data-subject="${escapeHtml(subj)}" value="${v !== undefined && v !== null ? v : ""}"></td>`;
+            const absentCls = isAbsentMark(v) ? " mark-absent" : "";
+            return `<td><input type="text" inputmode="text" maxlength="3" class="mark-input${absentCls}" data-student="${st.id}" data-subject="${escapeHtml(subj)}" value="${v !== undefined && v !== null ? escapeHtml(v) : ""}"></td>`;
           }).join("")
         : (() => {
             const v = marksObj[sel.subject];
-            return `<td><input type="number" min="0" max="100" class="mark-input" data-student="${st.id}" data-subject="${escapeHtml(sel.subject)}" value="${v !== undefined && v !== null ? v : ""}"></td>`;
+            const absentCls = isAbsentMark(v) ? " mark-absent" : "";
+            return `<td><input type="text" inputmode="text" maxlength="3" class="mark-input${absentCls}" data-student="${st.id}" data-subject="${escapeHtml(sel.subject)}" value="${v !== undefined && v !== null ? escapeHtml(v) : ""}"></td>`;
           })();
       const stats = computeStudentTermStats(st.id, sel.grade, sel.term);
       const g = stats.entered > 0 ? gradeLetter(stats.average) : null;
@@ -889,8 +908,8 @@
         <div class="field"><label>Subject</label><select id="marks-subject">${subjectOptions}</select></div>
       </div>
       <p class="hint">${isWide
-        ? "Showing all subjects. Marks are out of 100 and save automatically. Blank cells count as 0 in the total."
-        : `Entering marks for <b>${escapeHtml(sel.subject)}</b> only. Total/Average reflect every subject entered by all teachers for this class.`}</p>
+        ? "Showing all subjects. Marks are out of 100 and save automatically. Blank cells count as 0 in the total. Type \"ab\" to mark a student absent for a subject."
+        : `Entering marks for <b>${escapeHtml(sel.subject)}</b> only. Total/Average reflect every subject entered by all teachers for this class. Type "ab" to mark a student absent.`}</p>
       ${students.length ? `<div class="table-wrap"><table>
         <thead><tr><th style="min-width:140px;">Student</th>${headerCells}<th>Total</th><th>Average</th><th>Grade</th></tr></thead>
         <tbody>${rows}</tbody>
@@ -917,8 +936,9 @@
       input.addEventListener("change", () => {
         const studentId = input.dataset.student;
         const subject = input.dataset.subject;
-        const val = clampMark(input.value);
+        const val = parseMarkInput(input.value);
         input.value = val === null ? "" : val;
+        input.classList.toggle("mark-absent", val === ABSENT);
         if (!data.marks[studentId]) data.marks[studentId] = {};
         if (!data.marks[studentId][sel.term]) data.marks[studentId][sel.term] = {};
         if (val === null) delete data.marks[studentId][sel.term][subject];
@@ -1046,7 +1066,7 @@
 
     const subjectRows = subjects.map((subj) => {
       const marksByTerm = TERMS.map((t) => studentMarks(studentId, t)[subj]);
-      const validMarks = marksByTerm.filter((v) => v !== undefined && v !== null && v !== "");
+      const validMarks = marksByTerm.filter((v) => v !== undefined && v !== null && v !== "" && !isAbsentMark(v));
       const subjAvg = validMarks.length ? validMarks.reduce((a, b) => a + Number(b), 0) / validMarks.length : null;
       const g = gradeLetter(subjAvg);
       return `<tr>
@@ -1257,12 +1277,12 @@
 
     subjects.forEach((subj) => {
       const marksByTerm = TERMS.map((t) => studentMarks(studentId, t)[subj]);
-      const validMarks = marksByTerm.filter((v) => v !== undefined && v !== null && v !== "");
+      const validMarks = marksByTerm.filter((v) => v !== undefined && v !== null && v !== "" && !isAbsentMark(v));
       const subjAvg = validMarks.length ? validMarks.reduce((a, b) => a + Number(b), 0) / validMarks.length : null;
       const g = gradeLetter(subjAvg);
       rows.push([
         subj,
-        ...marksByTerm.map((v) => (v !== undefined && v !== null && v !== "" ? Number(v) : "")),
+        ...marksByTerm.map((v) => (isAbsentMark(v) ? ABSENT : (v !== undefined && v !== null && v !== "" ? Number(v) : ""))),
         subjAvg !== null ? round1(subjAvg) : "",
         g || ""
       ]);
@@ -1321,6 +1341,7 @@
         const marksObj = studentMarks(r.id, term);
         const cells = subjects.map((subj) => {
           const v = marksObj[subj];
+          if (isAbsentMark(v)) return ABSENT;
           return v !== undefined && v !== null && v !== "" ? Number(v) : "";
         });
         rows.push([r.name, r.admissionNo || "", ...cells, r.total, round1(r.average), r.rank]);
@@ -1512,7 +1533,7 @@
 
     const body = subjects.map((subj) => {
       const marksByTerm = TERMS.map((t) => studentMarks(studentId, t)[subj]);
-      const validMarks = marksByTerm.filter((v) => v !== undefined && v !== null && v !== "");
+      const validMarks = marksByTerm.filter((v) => v !== undefined && v !== null && v !== "" && !isAbsentMark(v));
       const subjAvg = validMarks.length ? validMarks.reduce((a, b) => a + Number(b), 0) / validMarks.length : null;
       const g = gradeLetter(subjAvg);
       return [
@@ -1642,9 +1663,12 @@
     const students = getStudentsFor(grade, cls);
     const bins = new Array(10).fill(0);
     const marked = [];
+    let absentCount = 0;
     students.forEach((st) => {
       const v = studentMarks(st.id, term)[subject];
-      if (v !== undefined && v !== null && v !== "") {
+      if (isAbsentMark(v)) {
+        absentCount++;
+      } else if (v !== undefined && v !== null && v !== "") {
         const n = Number(v);
         marked.push(n);
         let idx = Math.floor(n / 10);
@@ -1653,7 +1677,7 @@
         bins[idx]++;
       }
     });
-    return { bins, marked, totalStudents: students.length };
+    return { bins, marked, totalStudents: students.length, absentCount };
   }
 
   function buildHistogramSvg(counts, labels) {
@@ -1699,7 +1723,7 @@
         <div class="empty-state"><p>No subjects configured for ${escapeHtml(sel.grade)}. Add subjects under Setup first.</p></div></div>`;
     }
 
-    const { bins, marked, totalStudents } = computeMarkHistogram(sel.grade, sel.cls, sel.term, sel.subject);
+    const { bins, marked, totalStudents, absentCount } = computeMarkHistogram(sel.grade, sel.cls, sel.term, sel.subject);
     const labels = ["0-10", "10-20", "20-30", "30-40", "40-50", "50-60", "60-70", "70-80", "80-90", "90-100"];
     const avg = marked.length ? round1(marked.reduce((a, b) => a + b, 0) / marked.length) : null;
     const highest = marked.length ? Math.max(...marked) : null;
@@ -1721,9 +1745,10 @@
             <div class="stat"><div class="num">${avg}%</div><div class="label">Average</div></div>
             <div class="stat"><div class="num">${highest}</div><div class="label">Highest</div></div>
             <div class="stat"><div class="num">${lowest}</div><div class="label">Lowest</div></div>
+            <div class="stat"><div class="num">${absentCount}</div><div class="label">Absent</div></div>
           </div>
           <div>${buildHistogramSvg(bins, labels)}</div>
-        ` : `<div class="empty-state"><p>No marks recorded yet for ${escapeHtml(sel.subject)} in ${escapeHtml(sel.term)}.</p></div>`}
+        ` : `<div class="empty-state"><p>No marks recorded yet for ${escapeHtml(sel.subject)} in ${escapeHtml(sel.term)}.${absentCount ? ` (${absentCount} student(s) marked absent.)` : ""}</p></div>`}
       </div>
     `;
   }

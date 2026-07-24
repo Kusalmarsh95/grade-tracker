@@ -295,6 +295,7 @@ tbody tr:hover{ background:#FAFBF9; }
 }
 .mark-input.grade-A{ background:var(--success-soft); }
 .mark-input.grade-W{ background:var(--danger-soft); }
+.mark-input.mark-absent{ background:var(--accent-soft); color:var(--accent-deep); font-weight:700; text-align:center; }
 
 .badge-grade{
   display:inline-block;
